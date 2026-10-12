@@ -1,424 +1,273 @@
-# GrantLoom — Product Requirements Document (PRD) v0.2
+# GrantLoom — Product Requirements Document (PRD)
 
+**Document Version:** 1.0  
+**Status:** Approved Architectural Baseline  
 **Date:** 2026-10-12  
-**Status:** Approved Architectural Baseline.  
-**Target Environment:** Python 3.12 (Native on Windows for Step 1; Dockerized on 8 GB VPS for Step 2).  
-**Inputs:** `idea.md`, `market-research.md`, `data-strategy.md`, `project-review.md`, `project-requirements.txt`, and user design decisions of 2026-10-12.
+**Target Environment:** Python 3.12 (Native on Windows for Step 1; Dockerized on 8 GB VPS for Step 2)  
+**Companion Artifacts:** [Decisions Log](file:///c:/Data/work/grantloom/decisions-log.md) | [Implementation Plan & Test Strategy](file:///c:/Data/work/grantloom/implementation-plan.md) | [Market Research](file:///c:/Data/work/grantloom/market-research.md)
 
 ---
 
-## 1. Purpose and Positioning
+## 1. Overview & Purpose
 
-GrantLoom is a **backend-first, self-hosted RAG service** designed for research labs and academic teams. A lab uploads funding solicitations (NOFOs / RFPs), past successful grant proposals, researcher CVs, institutional policies, and budget spreadsheets. It queries this corpus to receive:
-1. **Answers with verifiable citations** (exact file, page, or spreadsheet sheet/row coordinates).
-2. **Compliance & gap matrices** comparing solicitations against the lab's evidence.
+### 1.1 Executive Pitch
+* **The Problem (1 Sentence):** Research labs spend hundreds of hours manually dissecting complex grant solicitations and cross-checking institutional proposal claims across scattered documents, risking immediate disqualification from unnoticed compliance gaps or fabricated citations.
+* **The Solution (1 Sentence):** GrantLoom is a self-hosted, lightweight RAG service combining hybrid vector and graph retrieval that cross-references funding solicitations against institutional documents to generate verifiable, coordinate-level cited answers and automated compliance matrices.
 
-### Core Architectural Pillars
-- **Zero-Docker Embedded Execution for Local Dev (Step 1):** Native Python 3.12 on Windows using embedded persistent stores (ChromaDB for dense vectors, KùzuDB for graph relationships, and SQLite for registry, structured data, and BM25 keyword search).
-- **Lightweight VPS Footprint (Step 2):** Runs within a 2-vCPU / 8 GB VPS demo environment (< 2.5 GB RAM footprint), hooking directly into the host's **pre-existing Prometheus and Grafana** instances.
-- **Bring Your Own Key (BYOK) for OpenRouter:** Users supply their own OpenRouter API key via HTTP headers. No backend LLM wallet or server token liability; keys are validated live, used ephemerally, and never persisted or logged.
-- **Citation Validity by Construction:** The LLM never invents filenames or page numbers; it cites chunk IDs that the backend resolves and verifies against the document registry.
-- **Hexagonal, Layered, Clean-Code Engineering:** Strict separation of concerns (`api -> service -> repository/adapter`), pluggable ports, zero hardcoded limits, fail-fast mechanics, and structured RFC 7807 errors.
+### 1.2 Initiative Summary & Ownership
+GrantLoom is built as a **backend-first, self-hosted RAG service** tailored for academic research groups and research administration offices. The system indexes Notices of Funding Opportunity (NOFOs / RFPs), prior proposals, researcher CVs, institutional policy manuals, and budget spreadsheets. 
 
----
+Unlike generic document chat assistants, GrantLoom guarantees **citation validity by construction**: the generation model never invents file names or page numbers; it cites verified chunk IDs that the backend resolves and validates against the document registry.
 
-## 2. Decisions Log & Resolved Conflicts
-
-### 2.1 Decisions Log
-
-| ID | Decision | Details / Rationale |
-|----|----------|---------------------|
-| D1 | **Backend Stack** | Python 3.12 + FastAPI (async). Native Windows support without Docker for Step 1. |
-| D2 | **Vector & Keyword Store** | **ChromaDB** (embedded persistent mode) for dense vectors + **SQLite FTS5** for BM25 keyword retrieval, fused via Reciprocal Rank Fusion (RRF). Pluggable via `VectorStorePort`. |
-| D3 | **Graph Store** | **KùzuDB** (`kuzu` embedded in-process graph database). Replaces heavy Neo4j; standard Cypher querying, < 100 MB RAM, zero external containers. Pluggable via `GraphStorePort`. |
-| D4 | **Structured Store** | Excel and CSV loaded into **SQLite**; LLM writes read-only SQL validated by an AST SQL guard. |
-| D5 | **Source of Truth** | **Document registry** (SQLite with content hash, version, and state machine) + **outbox**; all vector, graph, and SQL indexes are derived and rebuildable from original files. |
-| D6 | **Access Control** | Single-user, no user registration/login screens. Server protected by static master key (`X-API-Key`) defined in `.env`. UI passes this header. |
-| D7 | **LLM & Inference Model** | **Bring Your Own Key (BYOK)** via OpenRouter. Keys passed in `X-OpenRouter-Key` request header. Validated live before use. Never stored on disk or logged. Client UI keeps it in browser storage (IndexedDB/localStorage). |
-| D8 | **Private Mode** | Config-driven switch (`llm.private_mode: false`). When enabled for testing on Windows, routes to local Ollama. Disabled on the demo VPS. |
-| D9 | **Decision Layer** | Julia-1 container dropped to conserve RAM. Pluggable `DecisionBackendPort` uses Cloud prompts (or lightweight rule heuristics) for G1–G4 guardrails. |
-| D10 | **Monitoring & Metrics** | FastAPI exposes `/metrics` for Prometheus scrape. GrantLoom **reuses existing host Prometheus and Grafana**; no duplicate containers spawned. |
-| D11 | **Async Ingestion & Idempotency** | Ingestion runs asynchronously with status polling. Content-hash (SHA-256) deduplication guarantees that re-uploading an identical document is an instantaneous no-op. |
-| D12 | **Output QA Loop** | Bounded rewrite loop (max 2 iterations). Structured failure feedback sent to writer; unresolvable claims degrade gracefully with explicit UI warnings. |
-| D13 | **Zero Hardcoding** | All limits (file size, doc counts, page caps, timeouts, thresholds) loaded from `config.json`. Zero hardcoded defaults in code. |
-| D14 | **Starter Questions** | `GET /api/v1/examples` serves curated domain prompts loaded from `config/example_questions.json` for immediate demo exploration. |
-| D15 | **Synthetic Data Tooling** | Synthetic test proposals/NOFOs are **not** checked into Git. Provided via an on-demand generator script (`python -m app.cli.generate_synthetic_docs`). |
-| D16 | **Engineering Principles** | Layered (`api -> service -> adapter`), Hexagonal ports, Fail-fast with RFC 7807, intelligent retries only (transient 429/503; no 4xx retries), zero dead code. |
-
-### 2.2 Resolved Architectural Conflicts
-
-| ID | Conflict | Resolution |
-|----|----------|------------|
-| **C1** | Full stack memory (> 6 GB) vs 8 GB host with existing services | **Resolved:** Replaced Neo4j with in-process KùzuDB (~100 MB). Replaced standalone Qdrant container with embedded ChromaDB. Dropped Julia-1 container. Hook into existing Prometheus/Grafana. Total GrantLoom memory drops to **< 2.5 GB RAM**. |
-| **C2** | Private mode on 2-vCPU VPS | **Resolved:** Private mode is a configuration toggle (`llm.private_mode: false`). Demo runs in cloud BYOK mode. Local Ollama testing supported only on developer's local machine. |
-| **C3** | Public demo VPS vs "No Login" | **Resolved:** Protected by `X-API-Key` server secret header + reverse proxy TLS/rate limiting. No login UI required. |
-| **C4** | Neo4j JVM memory footprint | **Resolved:** Dropped Neo4j completely. Adopted **KùzuDB** behind `GraphStorePort`. Kùzu runs embedded in Python 3.12, parses Cypher natively, and requires no background daemon. |
+* **Product Ownership:** Research Operations & Lab Systems.
+* **Target Release:** v1 Single-User Self-Hosted Appliance (Local Windows execution first, followed by a lightweight 8 GB VPS deployment).
 
 ---
 
-## 3. Strict Engineering & Quality Principles
+## 2. Problem Statement & Business Context
 
-The implementation must unconditionally adhere to the following architectural rules:
+### 2.1 The Customer Pain Point
+Securing scientific grants (e.g. NIH R01, NSF CAREER, Horizon Europe) is an existential challenge for research institutions. Submissions routinely fail before peer review due to administrative non-compliance (missing eligibility criteria, unaligned budget categories, or unverified claims). 
 
-### 3.1 Hexagonal (Ports & Adapters) Architecture
-Business logic (`services/`) must depend only on abstract interfaces (`ports/`), never concrete third-party SDKs:
-- `VectorStorePort` (implemented by `ChromaAdapter`)
-- `GraphStorePort` (implemented by `KuzuAdapter`)
-- `StructuredStorePort` (implemented by `SqliteStructuredAdapter`)
-- `RegistryPort` (implemented by `SqliteRegistryAdapter`)
-- `LLMClientPort` (implemented by `OpenRouterClientAdapter`)
-- `EmbedderPort` (implemented by `OpenRouterEmbedderAdapter` / optional `OllamaEmbedderAdapter`)
-- `DecisionBackendPort` (implemented by `PromptJudgeAdapter`)
+Researchers face three critical hurdles:
+1. **Solicitation Volume & Density:** Federal solicitations are 40–120 pages of dense, multi-layered regulatory jargon with nested conditional requirements.
+2. **Scattered Institutional Memory:** Evidence required to satisfy requirements (past project outcomes, biosketches, equipment lists, matching fund policies) is fragmented across PDFs, Word documents, and Excel spreadsheets.
+3. **The LLM Hallucination Trap:** Commercial, generic chatbots frequently invent citations, miscalculate spreadsheet budget figures, or conflate requirements from different grant mechanisms.
 
-### 3.2 Layered Responsibility Boundaries
-```
-API Layer (Routers, DTOs, HTTP status, Headers)
-   └── Service Layer (Orchestration, Guards, Rewrite Loops, Business Rules)
-         └── Domain / Ports (Pure business models, interfaces)
-               └── Adapters / Repositories (SQL, Chroma, Kùzu, OpenRouter API calls)
-```
-- **Rule:** API endpoints must never execute SQL queries, Cypher statements, or low-level store calls directly.
-- **Rule:** Services must remain framework-agnostic (no FastAPI `Request` objects passed into service methods).
+### 2.2 Market Gap
+Existing market solutions fall into two unviable extremes:
+* **Enterprise Grant Management Suites:** Cost $30k–$80k/year, require months of IT procurement, and focus on billing/accounting rather than technical proposal compliance.
+* **Consumer "Chat with your PDF" Tools:** Lack table/spreadsheet support, hallucinate citations, transmit confidential proprietary research data to third-party model providers, and cannot map relationship chains (e.g., *Which past grant funded which equipment operated by which co-investigator?*).
 
-### 3.3 Zero Hardcoding & Configuration Separation
-- **Secrets (`.env`):** Restricted solely to private keys and credentials (e.g. `GRANTLOOM_SERVER_API_KEY`). A sanitized `.env.example` must be maintained.
-- **Config (`config/config.json`):** All operational settings, model designations, token budgets, thresholds, rate limits, timeouts, and quota caps (e.g. `max_documents`, `max_file_size_mb`).
-- **Local Overrides (`config/config.local.json`):** Git-ignored file for machine-specific overrides.
-- **Prompts & Templates:** All system prompts, guard questions, refusal responses, and report templates live in versioned files under `prompts/` and `templates/`.
-
-### 3.4 Fail-Fast & Explicit Error Handling
-- **No Error Swallowing:** Never use generic `except Exception: pass` or mock fallbacks that conceal real system failures.
-- **RFC 7807 Problem Details:** All API errors return a standard JSON structure with `type`, `title`, `status`, `detail`, and `instance`.
-- **Intelligent Retries Only:** Retries with exponential backoff and jitter are permitted **only** for transient upstream issues (HTTP 429 Rate Limit, HTTP 502/503/504). **Never retry** client errors (HTTP 400, 401, 403, 404, 422) or unrecoverable validation faults.
-
-### 3.5 Clean Code, Single Responsibility (SRP) & DRY
-- **File Size Ceiling:** Modules must target 200–500 lines. Files exceeding 1,000 lines are prohibited.
-- **Dead Code Elimination:** Zero orphaned helper functions, unused imports, obsolete variables, or commented-out blocks.
+GrantLoom fills this gap with a self-hosted, lightweight appliance delivering deterministic citation resolution, structured spreadsheet querying, and relationship-aware graph retrieval.
 
 ---
 
-## 4. System Architecture
+## 3. Target Users & Personas
 
-### 4.1 Step 1 vs Step 2 Target Architecture
-
-```mermaid
-flowchart TD
-  subgraph Client [Client / Browser UI]
-    UI["Single-Page App (Vanilla JS)"]
-    LS[("Browser Storage\nStores OpenRouter Key & Server Key")]
-  end
-
-  subgraph Host [Host System (Windows Dev or Linux VPS)]
-    NG["Reverse Proxy / Nginx\nTLS, Rate Limiting, Static UI"]
-    
-    subgraph GrantLoom [GrantLoom Python 3.12 Backend]
-      API["FastAPI App (API Process)\nRouters: ask, docs, examples, health"]
-      SVC["Service Orchestrator\nGuards G1-G4, Router, Citations"]
-      WRK["Ingestion Worker Process\nExtract, Chunk, Scan, Index"]
-      
-      subgraph EmbeddedStores [Embedded File Stores (Zero Docker)]
-        REG[("SQLite DB\nRegistry, Outbox, Structured Tables, FTS5")]
-        VEC[("ChromaDB\nPersistent Dense Vectors")]
-        GRP[("KùzuDB\nPersistent Graph (Cypher)")]
-      end
-    end
-
-    subgraph HostMonitoring [Existing Host Monitoring]
-      PROM["Prometheus (Already running on host)"]
-      GRAF["Grafana (Already running on host)"]
-    end
-  end
-
-  subgraph Cloud [External Cloud APIs]
-    OR["OpenRouter API\n(User's BYOK Account)"]
-  end
-
-  UI -->|"X-API-Key\nX-OpenRouter-Key"| NG
-  NG --> API
-  API --> SVC
-  SVC --> REG
-  SVC --> VEC
-  SVC --> GRP
-  SVC -->|"BYOK Header"| OR
-  API -->|"Enqueue Job"| REG
-  WRK -->|"Poll Outbox"| REG
-  WRK --> VEC
-  WRK --> GRP
-  WRK -->|"BYOK Ingestion Scan"| OR
-  PROM -->|"Scrape /metrics"| API
-  GRAF --> PROM
-```
-
-### 4.2 Two-Process Concurrency Model
-1. **API Process (`app.main:app`):** Handles incoming client HTTP/SSE requests. Performs read-only queries against SQLite, ChromaDB, and KùzuDB (`read_only=True`). Enqueues ingestion jobs to the SQLite `outbox` table.
-2. **Worker Process (`app.worker:run_worker`):** Polls the SQLite `outbox` table. Executes CPU-intensive extraction, chunking, and write-indexing to ChromaDB and KùzuDB. Holds write locks during transactions.
-
-### 4.3 Memory Budget (Verified for 8 GB Host)
-
-| Component | Nature | Memory Footprint | Note |
-|-----------|--------|------------------|------|
-| GrantLoom API (FastAPI) | Python 3.12 process | ~250–350 MB | Handles async requests & SSE |
-| GrantLoom Ingestion Worker | Python 3.12 process | ~400–700 MB | Peaks during multi-page PDF parsing |
-| ChromaDB | Embedded in-process | ~150–250 MB | HNSW index on disk |
-| KùzuDB | Embedded in-process | ~80–150 MB | In-process columnar graph engine |
-| SQLite (Registry + FTS5) | Embedded in-process | ~50–100 MB | WAL mode, shared cache |
-| Host Prometheus + Grafana | Existing host services | 0 MB (reused) | Reused from host; no new containers |
-| **Total GrantLoom Footprint** | | **~1.0–1.6 GB RAM** | **Comfortably fits 8 GB host with > 5 GB headroom** |
-
-### 4.4 Module Layout
-```
-app/
-  api/                    # HTTP layer (FastAPI routers, request models, problem details)
-    routers/              # ask, documents, examples, admin, health
-    middleware/           # api_key_auth, rate_limiter, openrouter_key_validator
-  ports/                  # Hexagonal abstract interfaces
-    vector_store.py       # VectorStorePort
-    graph_store.py        # GraphStorePort
-    structured_store.py   # StructuredStorePort
-    registry.py           # RegistryPort
-    llm_client.py         # LLMClientPort
-    embedder.py           # EmbedderPort
-    decision_backend.py   # DecisionBackendPort
-  adapters/               # Concrete implementations of ports
-    chroma_adapter.py     # ChromaDB implementation
-    kuzu_adapter.py       # KùzuDB implementation
-    sqlite_registry.py    # SQLite registry & outbox
-    sqlite_structured.py  # SQLite tables & FTS5 search
-    openrouter_client.py  # OpenRouter HTTP client with BYOK
-    openrouter_embed.py   # OpenRouter embedding client
-    prompt_judge.py       # LLM-based decision judge
-  services/               # Business domain & orchestration
-    document_service.py   # Upload, hashing, status polling, deletion
-    ingest_service.py     # Extraction, sanitization, chunking, scanning
-    retrieval_service.py  # Hybrid (dense+BM25), graph, SQL, RRF fusion
-    answer_service.py     # G1-G4 pipeline, SSE streaming, rewrite loop
-    citation_service.py   # Chunk ID resolution and ground-truth verification
-  core/                   # Shared plumbing
-    config.py             # Typed Pydantic configuration loader
-    errors.py             # Custom domain exceptions
-    logging.py            # Structured JSON logger (anonymized)
-  cli/                    # Standalone CLI tools
-    generate_synthetic.py # On-demand test data generator
-prompts/                  # External versioned prompt templates (Markdown/YAML)
-templates/                # Refusal templates, report layouts
-config/                   # config.json, config.example.json, example_questions.json
-```
-
----
-
-## 5. Document Lifecycle & Ingestion Pipeline
-
-### 5.1 Asynchronous Lifecycle & State Machine
-Every uploaded document transitions through an audited state sequence recorded in SQLite:
-`uploaded → validating → scanning → extracting → sanitizing → chunking → embedding → indexing → verifying → active`
-- **Error States:** `rejected` (validation fail), `quarantined` (tainted/injection suspect), `failed_retryable`.
-- **Concurrency & Resumability:** The worker advances the state only after the respective step is durable. If the worker restarts, uncompleted jobs in `outbox` resume from their last verified milestone.
-
-### 5.2 Strict Ingestion Idempotency
-To prevent double-processing and wasted tokens:
-1. **Streaming SHA-256:** On `POST /documents`, the API computes the document's SHA-256 hash in 64 KB chunks without loading the entire file into memory.
-2. **Registry Hash Lookup:**
-   - **Match Found (`state = active`):** Instant `200 OK`. Returns existing `doc_id`, metadata, and `message: "Document already indexed"`. Zero background work enqueued.
-   - **Match Found (`state = processing`):** Instant `202 Accepted`. Returns existing `doc_id` and polling URL.
-   - **Identical Filename + New Hash:** Generates a new version entry (`version: 2`) under the document record.
-   - **New Hash:** Enqueues an ingestion task into the `outbox` table and returns `202 Accepted` with a new `doc_id`.
-
-### 5.3 Asynchronous Status Polling
-Clients track ingestion by polling `GET /documents/{doc_id}`:
-```json
-{
-  "doc_id": "doc_9f83a1b",
-  "filename": "NIH_R01_Solicitation.pdf",
-  "state": "indexing",
-  "progress_pct": 82,
-  "pages_processed": 45,
-  "total_pages": 55,
-  "created_at": "2026-10-12T19:40:00Z",
-  "error": null
-}
-```
-
-### 5.4 Bring Your Own Key (BYOK) Propagation
-1. The client provides `X-OpenRouter-Key` in the upload request header.
-2. The key is validated live against OpenRouter's auth endpoint.
-3. The key is passed into the worker's transient in-memory job context.
-4. **Security Invariant:** The OpenRouter key is **never written to the SQLite database**, never saved to disk, and never output in logs or traces.
-
-### 5.5 Ingestion Hardening Layers
-- **L1 Basic Limits:** Validate magic bytes, extension, file size (`limits.max_file_size_mb`), page count (`limits.max_pages_per_file`). Reject password protection or decompression bombs.
-- **L2 Sandboxed Extraction:** `pypdf` / `pdfplumber` / `openpyxl` extraction executed with memory and CPU execution timeouts.
-- **L3 Hidden Content Scan:** Strip zero-width Unicode characters, off-page text coordinates, and microscopic fonts.
-- **L4 Two-Tier Injection Scan:**
-  - *Tier 1 (Heuristic):* Fast regex evaluation for adversarial instructions ("ignore previous instructions", "system prompt override").
-  - *Tier 2 (Targeted LLM check):* LLM injection check triggers **only** if Tier 1 scores above threshold or on a configurable random sample (e.g. 2%). Chunk verdicts cached by content hash.
-- **L5 Quarantine & Human Review:** Documents exceeding the taint threshold enter `quarantined` state. Excluded from retrieval until explicitly released via `POST /documents/{id}/release`.
-
----
-
-## 6. Question Answering & Retrieval Pipeline
+GrantLoom v1 is designed for a **single-user, single-workspace** deployment model operated by technical academic researchers.
 
 ```
-User Query + X-OpenRouter-Key
-    │
-    ▼
-[Middleware: Live Key Validation & Rate Limit Check]
-    │
-    ▼
-[G1 Input Guard: Domain Relevance & Prompt Injection Scan]
-    │── (Refusal / Malicious) ──► Strict Polite Refusal Template (No Retrieval)
-    ▼ (Pass)
-[G2 Router: Strategy Selection] ──► {hybrid, graph, structured, composite}
-    │
-    ▼
-[Multi-Store Retrieval]
-    ├── Dense Vectors: ChromaDB
-    ├── Keyword BM25: SQLite FTS5 (Fused via RRF)
-    ├── Graph Relations: KùzuDB (Parameterized Cypher Templates)
-    └── Tabular Data: Read-Only SQLite (Validated via SQL Guard)
-    │
-    ▼
-[G3 Reranker & Context Filter] ──► Top K chunks; drop injection-suspect passages
-    │
-    ▼
-[Writer LLM Generation (OpenRouter BYOK)]
-    │── System Prompt: Untrusted Context Blocks; Must Cite Chunk IDs
-    ▼
-[G4 Output Guard: Citation Resolution & Claim Support Verification]
-    │── (Passed ≥ 0.98 Claims) ──► Stream SSE Answer + Resolved Source Badges
-    └── (Failed Claims) ──► Rewrite Loop (Max 2 Attempts) ──► Graceful Warning
++---------------------------------------------------------------------------------+
+| PERSONA: Dr. Elena Vance — Principal Investigator & Lab Director               |
++---------------------------------------------------------------------------------+
+| Profile:       Mid-career PI managing a 12-person computational biology lab.   |
+| Technical Skill: Comfortable running scripts and local web services.          |
+| Environment:   Windows workstation locally; shared 8 GB VPS for team access.    |
++---------------------------------------------------------------------------------+
+| Goals:                                                                          |
+| - Rapidly evaluate whether a new 60-page NIH solicitation fits her lab.         |
+| - Verify whether lab biosketches and facilities meet exact solicitation clauses.|
+| - Ask budget questions across past and draft proposal spreadsheets.             |
+| Frustrations:                                                                   |
+| - Fears AI hallucinations fabricating non-existent grant guidelines.            |
+| - Dislikes monthly SaaS subscriptions and refuses to send unpublished lab data  |
+|   to unauthorized third-party platforms.                                        |
+| Context of Use: Runs GrantLoom locally during proposal drafting sprints;         |
+|                 brings her own OpenRouter API key to pay only for tokens used.   |
++---------------------------------------------------------------------------------+
 ```
 
-### 6.1 G1–G4 Guardrails
-- **G1 Input Guard:** Rejects prompt injections and out-of-domain queries (e.g. general coding, creative writing) before consuming retrieval tokens.
-- **G2 Router:** Classifies query requirements. Chooses between dense+sparse hybrid, graph relationships, or SQL queries. Low-confidence queries default to hybrid.
-- **G3 Reranker:** Ranks candidate chunks and drops irrelevant or flagged context.
-- **G4 Output Guard:**
-  - Resolves emitted `chunk_id` markers to physical file coordinates (`filename`, `page`, `sheet`, `row`).
-  - Verifies that cited text spans genuinely exist in the registry.
-  - Verifies claim support. If ungrounded claims are detected, triggers a structured rewrite loop.
-
-### 6.2 Graph Retrieval with KùzuDB
-- In v1, the model **never writes free-form Cypher**.
-- Queries select from vetted parameterized templates:
-  - `find_requirements_for_topic(topic_keyword)`
-  - `find_investigators_by_expertise(skill)`
-  - `find_past_proposals_by_funder(funder_name)`
-- Parameter slots are sanitized against known entity names.
-
-### 6.3 Structured Spreadsheet Retrieval
-- Excel and CSV sheets stored as SQLite tables.
-- LLM generates a single `SELECT` query.
-- Evaluated by `sql_guard`: verified against allow-listed table/column names, read-only mode, strict execution timeout, row limit (max 100 rows).
+Other beneficiaries include **Postdoctoral Researchers** drafting proposal sections and **Academic Department Administrators** auditing budget spreadsheets.
 
 ---
 
-## 7. Configuration & Quota Limits
+## 4. Goals & Success Metrics
 
-All system capacities, thresholds, and operational flags reside in `config/config.json`. **No hardcoded values exist in application source code.**
+### 4.1 Primary Product Goals
+1. **Zero Hallucinated Citations:** Every factual claim must link to a verified, clickable source coordinate (file name, page number, line range, or sheet/row).
+2. **Lightweight System Footprint:** The entire backend (API, worker, dense vector store, graph store, and relational store) must run on an **8 GB VPS using < 2.5 GB RAM**.
+3. **Transparent Cost Control (BYOK):** Users provide their own OpenRouter API key; zero subscription fees or server-side inference liability.
+4. **Instant Ingestion Idempotency:** Duplicate document uploads must process in zero compute time via cryptographic deduplication.
 
-### 7.1 Configuration Schema (`config/config.json`)
-```json
-{
-  "limits": {
-    "max_documents": 50,
-    "max_file_size_mb": 25,
-    "max_pages_per_file": 100,
-    "max_query_length_chars": 1000,
-    "max_concurrent_ingest_jobs": 2
-  },
-  "models": {
-    "writer_model": "anthropic/claude-3.5-sonnet",
-    "qa_judge_model": "openai/gpt-4o-mini",
-    "router_model": "openai/gpt-4o-mini",
-    "embedding_model": "text-embedding-3-small"
-  },
-  "llm": {
-    "provider": "openrouter",
-    "private_mode": false,
-    "local_endpoint": "http://localhost:11434/v1",
-    "request_timeout_seconds": 30,
-    "max_retries": 3,
-    "retry_backoff_factor": 1.5
-  },
-  "guardrails": {
-    "max_rewrite_attempts": 2,
-    "injection_regex_threshold": 0.7,
-    "injection_sample_rate": 0.02,
-    "quarantine_retention_days": 14
-  },
-  "retrieval": {
-    "dense_top_k": 20,
-    "sparse_top_k": 20,
-    "rerank_top_k": 5,
-    "rrf_k": 60,
-    "router_min_confidence": 0.65
-  },
-  "logging": {
-    "log_full_prompts": false,
-    "log_level": "INFO"
-  }
-}
+### 4.2 Key Success Metrics & Targets
+
+| Metric | Target | Measurement Method |
+|--------|--------|--------------------|
+| **Citation Validity Rate** | ≥ 0.98 | Proportion of claims whose citations point to verified text spans in the registry on the golden test set. |
+| **Faithfulness Score** | ≥ 0.90 | Automated LLM judge evaluation verifying generated claims against retrieved context blocks. |
+| **Single-Hop Query Latency** | p95 ≤ 15 s | End-to-end time from query submission to complete stream completion (first token ≤ 1.5 s). |
+| **System Memory Footprint** | ≤ 2.5 GB RAM | Resident Set Size (RSS) across API, worker, and embedded stores under idle + active query load. |
+| **Direct Injection Block Rate** | ≥ 0.95 | Percentage of adversarial prompt-injection queries rejected at the G1 input guard. |
+| **Ingestion Idempotency** | 100% | Re-uploading identical documents incurs zero background worker execution. |
+
+---
+
+## 5. User Journeys & Critical Workflows (CUJs)
+
+### CUJ-1: Document Ingestion & Idempotent Verification
+1. **Upload:** User drags and drops an RFP PDF (`DOE_Solar_2026.pdf`) and past budget spreadsheet (`Lab_Budget_2025.xlsx`) into the UI.
+2. **BYOK Transport:** UI includes the user's OpenRouter API key in the `X-OpenRouter-Key` request header.
+3. **Idempotency Check:** Backend calculates SHA-256 hash. If already indexed, the system returns `200 OK` ("Document already active") immediately.
+4. **Async Processing:** If new, backend accepts (`202 Accepted`), stores file in the registry, and enqueues tasks into the SQLite outbox.
+5. **Status Polling:** Frontend polls `GET /api/v1/documents/{id}` displaying extraction progress, page counts, and current stage.
+6. **Active State:** Document index completes across ChromaDB, KùzuDB, and SQLite tables.
+
+### CUJ-2: Fact Retrieval with Verifiable Citations
+1. **Query Entry:** User selects a starter prompt or enters: *"What are the mandatory qualifications for co-principal investigators in the DOE solicitation?"*
+2. **Guard & Route:** G1 guard validates query safety. G2 router selects hybrid retrieval.
+3. **Generation:** Writer LLM generates the answer, citing internal chunk IDs (`[chunk_4a71]`).
+4. **Output Verification:** G4 guard resolves chunk IDs to physical coordinates (`DOE_Solar_2026.pdf, Page 14`).
+5. **Interactive Exploration:** User reads the streamed answer; clicking a citation badge opens the preview excerpt highlighting the source text.
+
+### CUJ-3: Automated NOFO Compliance Matrix Generation
+1. **Matrix Request:** User requests compliance evaluation for a specific solicitation ID.
+2. **Requirement Extraction:** System queries KùzuDB and ChromaDB to extract all mandatory requirements from the solicitation.
+3. **Cross-Referencing:** System retrieves past lab proposals, equipment lists, and CVs to evaluate compliance status per requirement (`Satisfied`, `Partial`, `Gap`).
+4. **Review & Export:** User reviews the matrix on-screen and clicks **Export to Excel** to download an audit-ready `.xlsx` spreadsheet.
+
+### CUJ-4: Quarantined Document Resolution
+1. **Taint Detection:** A collaborator uploads a proposal containing hidden prompt-injection text ("Ignore all previous instructions...").
+2. **Quarantine State:** Ingestion Layer 4 detects the anomaly; document enters `quarantined` state and is excluded from search indexes.
+3. **Audit & Review:** User inspects the administrative quarantine log (`GET /api/v1/documents`), views the flagged spans, and elects to redact or permanently delete the file.
+
+---
+
+## 6. Functional Requirements
+
+### 6.1 Ingestion & Document Lifecycle (FR-I)
+* **FR-I1 (Supported Formats):** System must parse PDF (text-layer), TXT, CSV, and XLSX formats. Password-protected files and scanned PDFs without a text layer must be rejected with descriptive error messages.
+* **FR-I2 (SHA-256 Idempotency):** Every file upload must compute a streaming SHA-256 hash. Identical hashes must resolve as immediate no-ops; identical filenames with different hashes must increment document versioning atomically.
+* **FR-I3 (Asynchronous Outbox & Polling):** File ingestion must execute asynchronously via a durable SQLite outbox table. Status must be queryable via `GET /api/v1/documents/{id}` (`stage`, `progress_pct`, `pages_processed`).
+* **FR-I4 (Sanitization & Quarantine):** Extraction must strip zero-width characters and hidden microscopic text. Chunks triggering prompt-injection heuristics must be quarantined and isolated from retrieval.
+* **FR-I5 (Cascading Deletion):** Deleting a document must atomically purge its raw files, registry record, ChromaDB vectors, KùzuDB nodes/edges, and SQLite spreadsheet tables.
+
+### 6.2 Question Answering & Reasoning (FR-Q)
+* **FR-Q1 (BYOK Header Validation):** API must accept `X-OpenRouter-Key` in request headers. Requests must fail fast (`401 Unauthorized`) via live upstream validation if the key is invalid or lacks credit balance. The key must never be logged or written to disk.
+* **FR-Q2 (G1 Input Guard):** Queries must be screened for prompt injection, adversarial exploits, and out-of-domain topics. Non-English queries must be rejected with a polite refusal template.
+* **FR-Q3 (G2 Router):** Router dynamically classifies queries into retrieval strategies: `semantic`, `keyword`, `hybrid`, `graph`, `structured`, or `composite`.
+* **FR-Q4 (Hybrid Retrieval):** Semantic queries combine dense vectors (ChromaDB) and sparse BM25 keyword matching (SQLite FTS5) fused via Reciprocal Rank Fusion (RRF).
+* **FR-Q5 (G4 Output Guard & Citations):** Generated claims must cite chunk IDs. Backend must resolve chunk IDs into physical coordinates (`file_name`, `page`, `line`, `sheet`, `row`) and verify that claims are supported by the source text.
+* **FR-Q6 (Bounded Rewrite Loop):** If ungrounded claims are detected, the output guard must trigger a rewrite loop (max 2 attempts) with structured feedback. Persistent failures must degrade gracefully with explicit UI warning badges.
+* **FR-Q7 (Server-Sent Events Streaming):** `POST /api/v1/ask` must stream stage progress events (`guarding`, `retrieving`, `generating`, `verifying`) followed by generated tokens and resolved citation metadata.
+
+### 6.3 Structured & Relational Stores (FR-S)
+* **FR-S1 (Spreadsheet SQL Queries):** CSV and XLSX sheets must load into typed SQLite tables. The LLM generates single `SELECT` statements validated by an AST SQL guard (read-only, table allow-list, row limit ≤ 100).
+* **FR-S2 (KùzuDB Graph Traversal):** Graph retrieval must use parameterized Cypher templates over minimal entity types (`Document`, `Requirement`, `Person`, `Project`, `Funder`). Generation of free-form Cypher is strictly prohibited in v1.
+* **FR-S3 (Source Tracing on Edges):** Every edge in KùzuDB must store a `source_chunk_id`. Graph facts without verified source chunks must never be cited in answers.
+
+### 6.4 Operations, UI Starter Data & Tooling (FR-O)
+* **FR-O1 (Starter Questions):** `GET /api/v1/examples` must serve curated demo questions from `config/example_questions.json`.
+* **FR-O2 (Prometheus Metrics Scrape):** Backend must expose `/metrics` endpoint compatible with the host's pre-existing Prometheus scraper.
+* **FR-O3 (Synthetic Data CLI):** A standalone CLI script (`python -m app.cli.generate_synthetic_docs`) must generate synthetic NOFOs and lab proposals on demand without checking generated documents into version control.
+
+---
+
+## 7. Non-Functional Requirements (NFR)
+
+* **NFR-1 (Performance & Latency):** Single-hop queries must achieve p95 latency ≤ 15 seconds; first streaming token emitted within 1.5 seconds. Ingestion extraction throughput must exceed 20 pages/second.
+* **NFR-2 (Memory Ceiling):** Total resident memory across all GrantLoom processes (API, worker, embedded ChromaDB, KùzuDB, and SQLite) must remain **below 2.5 GB RAM** under active load on the 8 GB host.
+* **NFR-3 (Zero Hardcoding):** All capacities, timeouts, model designations, token budgets, and thresholds must load dynamically from `config/config.json`. Application code must contain zero hardcoded constants.
+* **NFR-4 (Security & Privacy):** The API must enforce master key authorization (`X-API-Key`). BYOK OpenRouter keys must reside solely in client browser storage and ephemeral backend memory. Full prompt text logging must be disabled by default (`logging.log_full_prompts: false`).
+* **NFR-5 (Reliability & Crash Recovery):** SQLite database must run in Write-Ahead Logging (WAL) mode. System restarts must leave the registry consistent and resume uncompleted outbox tasks.
+* **NFR-6 (Auditability & Reproducibility):** Every query response must log a configuration hash and prompt template version to ensure deterministic evaluation.
+
+---
+
+## 8. High-Level System Architecture & Engineering Principles
+
+### 8.1 Component Architecture Overview
+
+```
+                      +---------------------------------------+
+                      |         Web Client (Vanilla JS)       |
+                      |  Stores: X-API-Key & OpenRouter Key   |
+                      +---------------------------------------+
+                                          │
+                                          │ HTTPS (X-API-Key + X-OpenRouter-Key)
+                                          ▼
+                      +---------------------------------------+
+                      |        Host Nginx Reverse Proxy       |
+                      |  TLS Termination, Rate Limiting (30/m)|
+                      +---------------------------------------+
+                                          │
+                                          ▼
++-----------------------------------------------------------------------------------+
+| GrantLoom Application Service (Python 3.12)                                        |
+|                                                                                   |
+|  +---------------------------+             +-----------------------------------+  |
+|  |     FastAPI API Layer     |             |      Ingestion Worker Layer       |  |
+|  |  Routers: ask, docs,      |             |  Extract, chunk, sanitize,        |  |
+|  |  examples, metrics        |             |  embed, graph index               |  |
+|  +─────────────┬─────────────+             +─────────────────┬─────────────────+  |
+|                │                                             │                    |
+|                ▼                                             ▼                    |
+|  +─────────────────────────────────────────────────────────────────────────────+  |
+|  | Service Domain & Orchestration (Guards G1-G4, Router, Citations, Rewrites)  |  |
+|  +──────────────────────────────────────┬──────────────────────────────────────+  |
+|                                         │                                         |
+|                                         ▼                                         |
+|  +─────────────────────────────────────────────────────────────────────────────+  |
+|  | Hexagonal Ports: VectorStore | GraphStore | StructuredStore | LLMClient     |  |
+|  +──────────────────────────────────────┬──────────────────────────────────────+  |
+|                                         │                                         |
+|        ┌────────────────────────────────┼────────────────────────────────┐        |
+|        ▼                                ▼                                ▼        |
+|  +───────────────+              +───────────────+              +───────────────+  |
+|  | ChromaDB Port |              |  KùzuDB Port  |              |  SQLite Port  |  |
+|  | (Dense Vecs)  |              | (Cypher Graph)|              | (Registry/FTS)|  |
+|  +───────────────+              +───────────────+              +───────────────+  |
++-----------------------------------------------------------------------------------+
+         │                                                                 │
+         ▼                                                                 ▼
++─────────────────────────────────+             +───────────────────────────────────+
+|   OpenRouter Cloud API (BYOK)   |             |  Pre-existing Host Monitoring     |
+|   (Writer / Judge Models)       |             |  Prometheus & Grafana (Port 9090) |
++─────────────────────────────────+             +───────────────────────────────────+
 ```
 
----
-
-## 8. API Contract & Endpoints
-
-All endpoints require the server access header `X-API-Key: <server_key>`. LLM-interacting endpoints require `X-OpenRouter-Key: <user_key>`. Errors adhere to RFC 7807 problem details.
-
-| Method | Endpoint | Headers Required | Description |
-|--------|----------|------------------|-------------|
-| `POST` | `/api/v1/documents` | `X-API-Key`, `X-OpenRouter-Key` | Multipart upload. Computes SHA-256. Returns `doc_id`, status (`active` or `processing`). |
-| `GET` | `/api/v1/documents` | `X-API-Key` | List indexed documents, page counts, versions, and states. |
-| `GET` | `/api/v1/documents/{id}` | `X-API-Key` | Status polling endpoint: returns stage progress and error details. |
-| `DELETE` | `/api/v1/documents/{id}` | `X-API-Key` | Deletes document and cascades removal from ChromaDB, KùzuDB, and SQLite. |
-| `POST` | `/api/v1/documents/{id}/release` | `X-API-Key` | Releases a quarantined document for indexing. |
-| `GET` | `/api/v1/documents/{id}/preview` | `X-API-Key` | Fetch citation source excerpt (page or row). |
-| `POST` | `/api/v1/ask` | `X-API-Key`, `X-OpenRouter-Key` | SSE endpoint streaming status events, generated text, and citation badges. |
-| `POST` | `/api/v1/compliance/{solicitation_id}` | `X-API-Key`, `X-OpenRouter-Key` | Generates requirement compliance/gap matrix. |
-| `GET` | `/api/v1/examples` | `X-API-Key` | Serves starter demo questions from `config/example_questions.json`. |
-| `GET` | `/metrics` | None (or basic auth) | Exposes Prometheus metrics for the host's existing Prometheus scraper. |
-| `GET` | `/healthz` | None | Liveness probe. |
-| `GET` | `/readyz` | None | Readiness probe (verifies database connections). |
+### 8.2 Strict Architectural Principles
+1. **Hexagonal Architecture (Ports & Adapters):** Domain services interact solely with abstract port interfaces. Storage and cloud adapters (Chroma, Kùzu, SQLite, OpenRouter) can be mocked or swapped without touching business logic.
+2. **Layered Boundaries:** Request flow is strictly unidirectional (`API -> Service -> Repository/Adapter`). API routers never execute direct database queries or business algorithms.
+3. **Fail-Fast Error Propagation:** No artificial fallbacks concealing bugs. Missing records fail immediately with RFC 7807 problem details.
+4. **Intelligent Retries Only:** Exponential backoff is applied solely to transient upstream network failures (HTTP 429, 502/503/504). Client errors (400, 401, 404, 422) never retry.
+5. **Clean Code Ceilings:** Focused modules targeting 200–500 lines (hard ceiling of 1,000 lines). Zero dead code or duplicate utilities.
 
 ---
 
-## 9. Resolution of Design Decisions (Section 14)
+## 9. Scope Boundaries
 
-| # | Decision Item | Final Resolution |
-|---|---------------|------------------|
-| **O1** | Target Host & Deployment | Target **8 GB host**, running GrantLoom stack in < 2.5 GB RAM. Existing host Prometheus/Grafana reused. |
-| **O2** | Private Mode Implementation | Architectural config toggle (`llm.private_mode: false`). Demo runs cloud BYOK. Local Ollama testing supported on Windows. |
-| **O3** | Ingestion Injection Scanning | Two-tier hybrid: 100% heuristic regex prefilter + LLM check on flagged items and 2% random sample. Cached by chunk hash. |
-| **O4** | Graph Entity Schema Depth | Minimal schema for v1: `Document`, `Requirement`, `Person`, `Project`, `Funder`. |
-| **O5** | Cypher Querying Policy | Parameterized templates only. Zero free-form Cypher generated in v1. |
-| **O6** | Document Identity & Deduplication | Content hash (SHA-256) is canonical. Same hash = instantaneous no-op. Same filename + new hash = atomic version increment. |
-| **O7** | Non-English Query Policy | Strict polite refusal template in v1. Fast rejection at G1 guard without initiating RAG retrieval. |
-| **O8** | Embedding Model | Cloud embeddings via OpenRouter/OpenAI API by default. Local model supported via optional configuration for Windows dev. |
-| **O9** | Full-Answer Caching | Disabled in v1 to prevent stale responses during demo and iterative tuning. Extraction and embedding caches enabled by hash. |
-| **O10** | Log Data Privacy | Full prompt and response text logged **off by default** (`logging.log_full_prompts: false`). IDs, metadata, and token tallies logged. |
-| **O11** | Rewrite Retry Limits | Maximum 2 rewrite attempts. Graceful partial answer degradation with warning badges upon second failure. |
-| **O12** | Refusal & Guard Templates | Stored as versioned Markdown files in `templates/refusals/*.md`. Loaded dynamically. |
-| **O13** | Citations for Plain Text / Tables | PDF = Page; TXT = Line Range; CSV/XLSX = Sheet + Row Number + Column Header. |
-| **O14** | Backup and Restore SLO | **Deferred as `[TODO]` post-demo.** SQLite + raw files constitute complete rebuildable state. |
-| **O15** | Domain & Reverse Proxy TLS | Handled via host Nginx reverse proxy terminating TLS and proxying to GrantLoom port. |
-| **O16** | Quarantined Document Retention | Retained in quarantine table for 14 days (`guardrails.quarantine_retention_days = 14`) for administrative review. |
-| **O17** | Document Conflict Resolution | Writer prompt instructs the model to highlight both conflicting terms along with their respective dates/versions. |
-| **O18** | Compliance Matrix Export Formats | Interactive JSON response in UI + downloadable Excel (`.xlsx`) generated via `openpyxl`. |
+### 9.1 In-Scope (v1 Release)
+* Native execution on Windows 11 (Python 3.12) with zero Docker dependencies (Step 1).
+* Lightweight deployment on 8 GB Linux VPS hooking into existing Prometheus/Grafana (Step 2).
+* Ingestion of PDF (text-layer), TXT, CSV, and XLSX files.
+* Asynchronous outbox processing with live status polling.
+* BYOK OpenRouter integration with live key validation.
+* Hybrid retrieval (ChromaDB dense + SQLite FTS5 BM25 with RRF).
+* In-process graph retrieval via KùzuDB parameterized templates.
+* Structured spreadsheet queries via read-only SQLite and AST guard.
+* Citation verification resolving chunk IDs to file/page/line/sheet/row coordinates.
+* Bounded rewrite loop (max 2 attempts) for claim verification.
+* Compliance matrix generation with Excel (`.xlsx`) export.
+* Starter questions endpoint (`GET /api/v1/examples`).
+
+### 9.2 Out-of-Scope (Deferred to Future Releases)
+* Multi-user tenancy, organizational accounts, and user registration UI.
+* Optical Character Recognition (OCR) for scanned PDFs and handwritten documents.
+* Complex layout table extraction from visual PDF geometries.
+* Automated funding opportunity web scraping / solicitation discovery crawlers.
+* Collaborative live multi-author proposal drafting editors.
+* Server-side automated backup daemons (deferred as `[TODO]`).
 
 ---
 
-## 10. Development Milestones & Rollout Plan
+## 10. Assumptions, Risks & Mitigations
 
-### Phase 1: Step 1 — Native Windows Development (Zero Docker)
-- **M0 (Setup & Foundations):** Python 3.12 virtual environment, project structure, typed configuration loading (`config.json`), `ports/` interfaces, and custom exception definitions.
-- **M1 (Registry & Ingestion):** SQLite document registry + outbox, SHA-256 deduplication, async polling endpoint (`GET /documents/{id}`), extractors for PDF/TXT/XLSX, and embedded ChromaDB integration.
-- **M2 (Query Pipeline & SSE):** BYOK header validation, G1 input guard, hybrid retrieval (ChromaDB + SQLite FTS5 with RRF), OpenRouter writer integration, G4 citation verification, and SSE streaming.
-- **M3 (Structured Data & Graph Integration):** SQLite table loading for spreadsheets with AST SQL guard; KùzuDB embedded graph setup with parameterized Cypher templates.
-- **M4 (Hardening, Guards & Rewrite Loop):** Two-tier ingestion injection checks, L1–L4 sanitization, bounded rewrite loop with feedback, and starter questions endpoint (`GET /examples`).
-- **M5 (Local Verification & Synthetic Tooling):** CLI generator for synthetic proposals/solicitations; unit and integration test suites validating end-to-end flow on Windows.
+| Risk / Assumption | Impact | Mitigation Strategy |
+|-------------------|--------|---------------------|
+| **Assumption:** User provides a funded OpenRouter API key. | High | Middleware executes live `/api/v1/auth/key` validation before processing requests; fails fast with clear guidance if balance is zero. |
+| **Risk: PDF Table Extraction Noise:** Irregular PDF tables produce corrupted text chunks. | Medium | Flag tables with confidence warnings; mandate that authoritative budgets be uploaded in native Excel/CSV format. |
+| **Risk: Concurrency on Embedded Stores:** File-based databases locking under concurrent read/write. | Medium | SQLite runs in WAL mode; KùzuDB opens in read-only mode in API processes while worker holds write locks during ingestion. |
+| **Risk: Indirect Prompt Injection:** Adversarial instructions hidden inside uploaded proposals hijack the LLM. | High | Two-tier defense: fast regex prefilter, sandboxed extraction, strict untrusted context delimiters, and writer tool restrictions. |
+| **Risk: VPS Host OOM:** Running multiple services exhausts the 8 GB host RAM. | High | In-process embedded engines (ChromaDB + KùzuDB + SQLite) eliminate container overhead; reuse existing host Prometheus/Grafana; overall RAM capped at < 2.5 GB. |
 
-### Phase 2: Step 2 — VPS Deployment & Demo Verification
-- **M6 (VPS Host Integration):** Systemd service or lightweight single Docker container deployment onto the 8 GB VPS. Connect GrantLoom `/metrics` to the host's existing Prometheus and Grafana.
-- **M7 (Reverse Proxy & Security):** Configure Nginx reverse proxy for TLS, static frontend hosting, rate limiting, and `X-API-Key` protection.
-- **M8 (Demo Rehearsal & Verification):** Verify live demo with real NOFOs and synthetic lab proposals; measure latency and memory consumption (< 2.5 GB).
+---
+
+## 11. Design & Technical Artifact References
+
+To ensure modularity and maintainability, implementation details, decisions, and data strategies are maintained in dedicated reference documents:
+
+* **[Architectural Decisions Log](file:///c:/Data/work/grantloom/decisions-log.md):** Complete record of decisions D1–D18, conflict resolutions C1–C4, and detailed options O1–O18.
+* **[Implementation Plan & Test Strategy](file:///c:/Data/work/grantloom/implementation-plan.md):** Two-phase rollout plan, milestones M0–M8, test harness specifications, and Definition of Done (DoD).
+* **[Market Research & Competitive Analysis](file:///c:/Data/work/grantloom/market-research.md):** Qualitative and quantitative research on academic research funding challenges.
+* **[Data Strategy Document](file:///c:/Data/work/grantloom/data-strategy.md):** Golden evaluation corpora and benchmark taxonomy.
