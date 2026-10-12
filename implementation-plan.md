@@ -1,175 +1,237 @@
 # GrantLoom — Implementation Plan & Test Strategy
 
-**Date:** 2026-10-12  
-**Status:** Approved  
-**Companion Documents:** [PRD.md](file:///c:/Data/work/grantloom/PRD.md) | [decisions-log.md](file:///c:/Data/work/grantloom/decisions-log.md)
+**Document Version:** 1.2  
+**Status:** Approved Operational Roadmap  
+**Date:** 2026-10-13  
+**Companion Documents:** [PRD.md](PRD.md) | [decisions-log.md](decisions-log.md) | [frontend-design.md](frontend-design.md) | [data-strategy.md](data-strategy.md)
 
 ---
 
-## 1. Execution Strategy: Two-Step Rollout
+## 1. Execution Strategy: Two-Phase Delivery
 
-To ensure rapid iteration and eliminate container debugging during core algorithmic development, implementation follows a strict **two-step strategy**:
+Implementation strictly follows a **two-phase strategy**:
 
 ```
-Step 1: Native Local Execution (Windows 11)
+Phase 1: Native Local Workstation (Windows 11)
   ├── Python 3.12 Virtual Environment
   ├── Embedded In-Process Storage (ChromaDB + KùzuDB + SQLite)
-  ├── BYOK OpenRouter Cloud Inference
+  ├── BYOK OpenRouter Cloud Inference + Optional Local Ollama Mode
+  ├── Thin Vanilla JS Single-Page App (IndexedDB, WCAG AA a11y, Zero Node Build)
   └── Zero Docker Container Dependencies
          │
-         ▼ (Passes Step 1 Definition of Done)
-Step 2: VPS Deployment & Demo Verification
-  ├── Linux 2-vCPU / 8 GB RAM VPS Host
-  ├── Systemd Service or Lightweight Single Docker Container
+         ▼ (Passes Phase 1 Definition of Done & Checkpoints)
+Phase 2: VPS Deployment & Demo Verification (Linux 8 GB VPS)
+  ├── Dockerized Multi-Stage Container (`Dockerfile` + `docker-compose.yml`)
   ├── Integration with Pre-existing Host Prometheus & Grafana
-  └── Nginx Reverse Proxy with TLS & Rate Limiting
+  ├── Nginx Reverse Proxy with TLS, Rate Limiting & SSE Buffering Disabled
+  └── Live Demo Rehearsal on Real Solicitations
 ```
 
 ---
 
-## 2. Milestone Breakdown
+## 2. Milestone Breakdown with Verifiable Checkpoints
 
-### Phase 1: Step 1 — Local Windows Development (Zero Docker)
+Every milestone contains **Actionable Tasks** and a **Verifiable Checkpoint & Required Evidence**. The code generator must execute the verification commands and output the required evidence before declaring a milestone complete.
+
+---
+
+### Phase 1: Native Windows Development (Zero Docker)
 
 #### Milestone M0: Foundations & Architecture Scaffolding
-- **Objectives:** Establish project workspace, packaging, typed configuration, and abstract ports.
-- **Deliverables:**
-  - `pyproject.toml` with pinned Python 3.12 dependencies (`fastapi`, `uvicorn`, `pydantic`, `chromadb`, `kuzu`, `openpyxl`, `pypdf`, `httpx`, `prometheus-client`).
-  - `app/core/config.py`: Pydantic V2 settings loader reading `config/config.json` and `.env`.
-  - `app/ports/`: Complete abstract interface definitions for `VectorStorePort`, `GraphStorePort`, `StructuredStorePort`, `RegistryPort`, `LLMClientPort`, `EmbedderPort`, `DecisionBackendPort`.
-  - Base RFC 7807 problem details exception hierarchy in `app/core/errors.py`.
-- **Exit Criteria:** Virtualenv runs clean; `pytest` runs skeleton tests; configuration validates strictly on invalid inputs.
+* **Actionable Tasks:**
+  1. Initialize Python 3.12 virtual environment and `pyproject.toml` with pinned dependencies (`fastapi`, `uvicorn`, `pydantic`, `chromadb`, `kuzu`, `openpyxl`, `pypdf`, `httpx`, `prometheus-client`, `slowapi`, `pytest`, `pytest-asyncio`).
+  2. Implement `app/core/config.py`: typed Pydantic V2 loader parsing `config/config.json` and `.env` with strict validation (no in-code defaults).
+  3. Create `config/config.json` default schema and `.env.example`.
+  4. Implement `app/ports/`: abstract interfaces (`VectorStorePort`, `GraphStorePort`, `StructuredStorePort`, `RegistryPort`, `LLMClientPort`, `EmbedderPort`, `DecisionBackendPort`).
+  5. Implement `app/core/errors.py`: RFC 7807 problem details exception hierarchy with stable error codes.
+* **Verifiable Checkpoint & Required Evidence:**
+  * **Command:** `pytest tests/unit/test_config.py tests/unit/test_errors.py`
+  * **Evidence:**
+    1. Test report showing 100% pass for valid config loading, missing key rejection, and RFC 7807 problem formatting.
+    2. CLI run proof demonstrating that running `python -c "from app.core.config import get_settings; print(get_settings().limits.max_documents)"` prints `50`.
+
+---
 
 #### Milestone M1: Registry, Ingestion Pipeline & Embedded Stores
-- **Objectives:** Build document lifecycle, SHA-256 deduplication, async polling, and embedded indexing.
-- **Deliverables:**
-  - SQLite document registry and outbox tables with WAL mode.
-  - Streaming SHA-256 computation on upload with instant deduplication check.
-  - Extraction adapters for PDF (`pypdf`/`pdfplumber`), TXT, and XLSX (`openpyxl`).
-  - Page-aware, section-aware chunker producing deterministic chunk IDs.
-  - `ChromaAdapter`: In-process ChromaDB persistent client indexing dense vectors.
-  - `SqliteRegistryAdapter`: Background worker consumer polling outbox and tracking state transitions (`uploaded → validating → extracting → chunking → embedding → indexing → active`).
-  - `GET /api/v1/documents/{id}` polling endpoint returning stage, percentage, and page counts.
-- **Exit Criteria:** Uploading a 50-page PDF processes asynchronously to `active`; polling updates live; re-uploading the identical file returns instant `200 OK` (idempotent no-op).
+* **Actionable Tasks:**
+  1. Build SQLite registry and outbox tables in `app/adapters/sqlite_registry.py` with WAL mode and transaction locking.
+  2. Implement `app/services/ingest_service.py`: streaming SHA-256 computation on upload with instant deduplication (same hash = `200 OK`; in-flight = `202 Accepted`).
+  3. Implement extractors: PDF via `pypdf` (text layer + `pdfplumber` fallback for tables), TXT, and XLSX via `openpyxl`.
+  4. Implement page-aware, section-aware chunker producing deterministic chunk IDs (`doc_id:page:index`). Ensure PDF chunks never span pages.
+  5. Implement `app/adapters/chroma_adapter.py`: in-process ChromaDB persistent client indexing dense vectors with **default ONNX embedder explicitly disabled** (`embedding_function=None`).
+  6. Implement background worker loop polling SQLite outbox and advancing states (`uploaded → extracting → chunking → embedding → active`).
+  7. Implement API routes: `POST /api/v1/documents` and `GET /api/v1/documents/{id}` polling endpoint.
+* **Verifiable Checkpoint & Required Evidence:**
+  * **Command:** `pytest tests/integration/test_ingestion_pipeline.py`
+  * **Evidence:**
+    1. Upload a multi-page test PDF via test harness; poll `GET /api/v1/documents/{id}` until `state == active`.
+    2. Upload the exact same file a second time; assert `200 OK` returned immediately with `message: "Document already indexed"` and zero duplicate outbox jobs.
+    3. Assert ChromaDB collection count equals expected chunk count and SQLite registry status is `active`.
+
+---
 
 #### Milestone M2: Query Pipeline, BYOK Validation & Citation Resolution
-- **Objectives:** Deliver interactive question answering with verified citations and SSE streaming.
-- **Deliverables:**
-  - `OpenRouterClientAdapter` handling live `X-OpenRouter-Key` validation and token generation.
-  - G1 Input Guard: Domain check and preliminary prompt-injection filter.
-  - Hybrid retrieval: Dense vectors (ChromaDB) + BM25 keyword search (SQLite FTS5) fused via Reciprocal Rank Fusion (RRF).
-  - System prompt builder with strict untrusted context boundaries.
-  - G4 Output Guard: Resolves cited chunk IDs to physical coordinates (`file_name`, `page`, `line`, `sheet`, `row`).
-  - SSE streaming endpoint `POST /api/v1/ask` emitting status events followed by text and citation badges.
-- **Exit Criteria:** Single-hop query streams verified answer with clickable citation badges within 15 seconds; invalid OpenRouter keys fail immediately with `401 Unauthorized`.
+* **Actionable Tasks:**
+  1. Implement `app/adapters/openrouter_client.py`: BYOK live key validation against OpenRouter `/api/v1/auth/key` probe (`401` on invalid, `402` on zero credit, `502` on upstream error).
+  2. Implement G1 Input Guard: regex injection prefilter, domain check, and language validator.
+  3. Implement G2 Strategy Router: dispatches to retrieval strategy (fallback: `hybrid`).
+  4. Implement hybrid retrieval: ChromaDB dense vectors + SQLite FTS5 BM25 keyword search fused via Reciprocal Rank Fusion (RRF).
+  5. Implement FR-Q8 Abstention: emits *"This information was not found in the indexed documents"* when retrieval score is below threshold.
+  6. Implement G4 Output Guard: resolves emitted chunk IDs to physical coordinates (`file_name`, `page`, `line`, `sheet`, `row`).
+  7. Implement confidence score calculation (proportion of claims verified against evidence) appended to response metadata.
+  8. Implement `POST /api/v1/ask` SSE streaming endpoint emitting canonical events: `guard → route → retrieve → filter → generate → verify → done`.
+* **Verifiable Checkpoint & Required Evidence:**
+  * **Command:** `pytest tests/integration/test_ask_pipeline.py`
+  * **Evidence:**
+    1. Mock query test asserting SSE event stream sequence and verifying that cited `chunk_id` markers resolve to genuine file/page coordinates with confidence score.
+    2. Test case asserting that query with zero matching chunks returns the exact abstention statement.
+    3. Test case with invalid `X-OpenRouter-Key` asserting immediate `401 Unauthorized` RFC 7807 problem response.
+
+---
 
 #### Milestone M3: Structured Spreadsheet & KùzuDB Graph Integration
-- **Objectives:** Enable spreadsheet SQL queries and relational graph queries.
-- **Deliverables:**
-  - XLSX sheet ingestion to typed SQLite tables with preserved original row numbers.
-  - `sql_guard`: Read-only AST validation enforcing single `SELECT`, allow-listed tables/columns, timeout, and max 100 row limits.
-  - `KuzuAdapter`: Embedded KùzuDB graph initialization with node types (`Document`, `Requirement`, `Person`, `Project`, `Funder`).
-  - Entity/relation extraction during ingestion producing edges with mandatory `source_chunk_id`.
-  - Parameterized Cypher templates for relationship traversal.
-- **Exit Criteria:** User can query a grant budget spreadsheet ("What is the total travel budget?") and receive the verified SQLite row citation; relation query retrieves relevant project/PI links via Kùzu.
-
-#### Milestone M4: Guardrails, Bounded Rewrite Loop & Starter Prompts
-- **Objectives:** Implement two-tier injection scanning, rewrite feedback loop, and demo example questions.
-- **Deliverables:**
-  - Two-tier injection scanner at ingestion (100% regex heuristic + targeted LLM probe on flagged items / 2% sample).
-  - Bounded rewrite loop in answer service (max 2 attempts) passing structured claim failure reasons to the writer.
-  - Graceful degradation: Warning badge emitted if a claim cannot be verified after 2 rewrite attempts.
-  - Metadata endpoint `GET /api/v1/examples` serving curated questions from `config/example_questions.json`.
-- **Exit Criteria:** Ingestion flags adversarial test document into quarantine; ungrounded claim triggers rewrite and self-corrects or emits warning badge.
-
-#### Milestone M5: Testing, Eval Harness & Synthetic Data Tooling
-- **Objectives:** Validate performance, citation fidelity, and regression gates.
-- **Deliverables:**
-  - `app/cli/generate_synthetic.py`: CLI tool generating test solicitations and lab proposals locally on demand.
-  - Golden evaluation runner testing 50 benchmark questions across 3 NOFOs.
-  - Automated evaluation metrics: Citation validity rate, Faithfulness, Retrieval recall.
-- **Exit Criteria:** Golden eval achieves ≥ 0.98 citation validity and ≥ 0.90 faithfulness.
+* **Actionable Tasks:**
+  1. Implement XLSX ingestion to typed SQLite tables preserving original row numbers.
+  2. Implement `app/verification/sql_guard.py`: AST parser enforcing read-only single `SELECT`, allow-listed tables/columns, timeout ≤ 5s, row limit ≤ 100.
+  3. Implement `app/adapters/kuzu_adapter.py`: embedded KùzuDB graph with node types (`Document`, `Requirement`, `Person`, `Project`, `Funder`) and parameterized Cypher templates.
+  4. Ensure graph edges capture mandatory `source_chunk_id`.
+  5. Add router strategies for `structured` and `graph` queries.
+* **Verifiable Checkpoint & Required Evidence:**
+  * **Command:** `pytest tests/integration/test_structured_and_graph.py`
+  * **Evidence:**
+    1. Query test against sample budget spreadsheet ("What is the travel total?") asserting correct SQL generation, AST guard pass, and row coordinate citation.
+    2. Malicious SQL test (`SELECT * FROM sqlite_master; DROP TABLE ...`) asserting immediate block by `sql_guard`.
+    3. Kùzu query test verifying relationship traversal and source chunk traceability on edges.
 
 ---
 
-### Phase 2: Step 2 — VPS Deployment & Demo Verification
-
-#### Milestone M6: VPS Service Packaging & Host Monitoring Hook
-- **Objectives:** Deploy onto the 8 GB Linux VPS and connect to existing Prometheus/Grafana.
-- **Deliverables:**
-  - Systemd service definition / lightweight multi-stage Dockerfile.
-  - Configuration of FastAPI Prometheus instrumentator at `/metrics`.
-  - Configuration of host's existing Prometheus scrape job to scrape GrantLoom port.
-  - Import pre-built GrantLoom dashboard into host's existing Grafana.
-- **Exit Criteria:** GrantLoom starts cleanly on VPS; Prometheus scrapes metrics; Grafana displays live query latencies, router decisions, and memory consumption (< 2.5 GB RAM).
-
-#### Milestone M7: Reverse Proxy, TLS & Master Key Protection
-- **Objectives:** Secure the public VPS demo endpoint.
-- **Deliverables:**
-  - Nginx configuration: TLS certificate (Let's Encrypt / Certbot), static frontend hosting, proxy pass to FastAPI.
-  - Master key middleware enforcing `X-API-Key` on all API endpoints.
-  - Rate limiting rules in Nginx and FastAPI middleware (30 requests/minute).
-- **Exit Criteria:** Unauthenticated public requests rejected; authenticated requests succeed over HTTPS.
-
-#### Milestone M8: End-to-End Demo Rehearsal & Delivery
-- **Objectives:** Final dry-run of demo workflows on live VPS.
-- **Deliverables:**
-  - Live demo script verifying NOFO upload, status polling, example questions, and compliance matrix generation.
-  - User documentation: Setup guide, BYOK instructions, and system boundaries.
-- **Exit Criteria:** Flawless demo run executed within latency benchmarks without host OOM crashes.
+#### Milestone M4: Guardrails, Bounded Rewrite Loop & Compliance Matrix
+* **Actionable Tasks:**
+  1. Implement two-tier injection scanner at ingestion (100% regex heuristic + targeted LLM probe on flagged items / 2% sample). Quarantine files exceeding taint threshold.
+  2. Implement bounded rewrite loop in answer service (max 2 attempts) with structured failure feedback.
+  3. Implement `POST /api/v1/compliance/{solicitation_id}`: extracts mandatory requirements, cross-references lab documents, and classifies status (`Satisfied`, `Partial`, `Gap`).
+  4. Implement `GET /api/v1/compliance/{solicitation_id}/export`: generates formatted `.xlsx` export via `openpyxl`.
+  5. Implement `GET /api/v1/examples` serving curated starter prompts from `config/example_questions.json`.
+* **Verifiable Checkpoint & Required Evidence:**
+  * **Command:** `pytest tests/integration/test_compliance_and_guards.py`
+  * **Evidence:**
+    1. Test uploading adversarial injection file; assert state transitions to `quarantined` and excluded from retrieval.
+    2. Compliance test: assert extraction of ≥ 5 requirements, correct classification, and successful generation of downloadable `.xlsx` workbook.
 
 ---
 
-## 3. Comprehensive Test Plan
-
-Testing follows the pyramid structure with explicit quality gates:
-
-```
-          [ Golden Eval Suite ]  -> 50-100 real/synthetic NOFO questions (CI Gate)
-       [ Integration Test Suite ] -> API routes, Async Polling, SSE streaming
-    [ Component / Adapter Tests ]  -> ChromaDB, KùzuDB, SQLite Guard, Ingestion
- [ Unit Tests: Business Logic ]    -> Chunker, Guards, Citation Resolver, Pydantic Config
-```
-
-### 3.1 Unit & Component Tests (`tests/unit`)
-1. **Config Validation:** Verify strict failure when limits or models are missing or corrupted in `config.json`.
-2. **Chunking Fidelity:** Verify PDF chunks never cross page boundaries; verify line numbers for TXT and sheet/row coordinates for XLSX.
-3. **AST SQL Guard:** Verify destruction attempts (`DROP`, `DELETE`, `UPDATE`, stacked queries, function execution) are blocked immediately.
-4. **Citation Resolver:** Verify that valid chunk IDs resolve to correct file/page/row metadata, and non-existent IDs raise validation errors.
-5. **OpenRouter BYOK Auth:** Mock OpenRouter responses to verify 401/402 live key failure handling.
-
-### 3.2 Integration & Pipeline Tests (`tests/integration`)
-1. **Async Ingestion & Polling:** Upload test PDF; poll `GET /api/v1/documents/{id}` until `state == active`; assert chunks in ChromaDB and nodes in KùzuDB.
-2. **Idempotent Re-upload:** Post identical document twice; verify immediate `200 OK` on second call without duplicate job in outbox.
-3. **SSE Streaming Pipeline:** Post `/api/v1/ask` with mock OpenRouter stream; verify status event order (`guard → route → retrieve → generate → verify → done`).
-4. **Rewrite Self-Healing:** Inject hallucinated chunk ID into mock writer output; verify rewrite loop fires and corrects the citation.
-
-### 3.3 Golden Evaluation & Security Suite (`tests/eval`)
-1. **Citation Grounding:** ≥ 98% of claims in golden answers cite authentic chunk IDs with matching textual evidence.
-2. **Faithfulness:** ≥ 90% faithfulness on ground-truth answer benchmarks.
-3. **Adversarial / Injection Defense:**
-   - 20 direct prompt injection queries (assert G1 blocks 100%).
-   - 10 indirect injection documents (embedded instructions in PDFs; assert L4/quarantine flags them).
+#### Milestone M5: Synthetic Demo Data Generator (CLI & Admin Endpoint)
+* **Actionable Tasks:**
+  1. Implement `app/cli/generate_synthetic.py`: standalone CLI utility generating high-fidelity demo grant documents into a local directory:
+     * `DOE_Solar_2026_Sample.pdf`: 25-page solicitation containing cost match (20%), equipment threshold ($50,000), and PI eligibility requirements.
+     * `Past_Proposal_2024_Sample.pdf`: 15-page past lab proposal citing Dr. Elena Vance's facilities and biosketch.
+     * `Lab_Budget_2025_Sample.xlsx`: 3-sheet budget spreadsheet with Personnel, Travel, and Equipment breakdowns.
+  2. Implement administrative endpoint `POST /api/v1/admin/generate-synthetic-data`: triggers synthetic file generation and automatically ingests them into the SQLite registry and index stores.
+* **Verifiable Checkpoint & Required Evidence:**
+  * **Command:** `python -m app.cli.generate_synthetic --output-dir data/test_synthetic && pytest tests/unit/test_synthetic_generator.py`
+  * **Evidence:**
+    1. Verify generated files exist on disk: `DOE_Solar_2026_Sample.pdf`, `Past_Proposal_2024_Sample.pdf`, `Lab_Budget_2025_Sample.xlsx`.
+    2. Assert PDF text layer contains verifiable target keywords and XLSX contains valid numeric cells.
+    3. Endpoint test confirming `POST /api/v1/admin/generate-synthetic-data` indexes all 3 documents to `active` state.
 
 ---
 
-## 4. Definition of Done (DoD)
+#### Milestone M6: Thin Frontend Implementation (Vanilla JS SPA)
+* **Actionable Tasks:**
+  1. Implement static frontend in `app/static/` matching [frontend-design.md](frontend-design.md): `index.html`, `styles.css`, `app.js`.
+  2. **Accessibility & Keyboard Nav:** Implement logical Tab sequence, skip link, focus traps in modals, and ARIA live regions for SSE streams.
+  3. **SEO & Crawlers:** Add semantic `<header>`, meta tags, and root static routes for `/robots.txt`, `/sitemap.xml`, and `/llms.txt`.
+  4. **IndexedDB Credential Manager:** Store API keys in browser IndexedDB. Implement live validation probe: disable ingestion dropzone and chat input until a valid key is configured.
+  5. **Ollama Integration:** Implement local Ollama selector, `/api/tags` model dropdown, short tool-calling diagnostic probe, and dynamic context budget indicator.
+  6. **Interactive Citation Drawer with Keyword Highlighting:** Clicking a citation badge slides open the excerpt drawer with search keywords wrapped in `<mark class="kw-highlight">`.
+  7. **Confidence Score & Demo Data UI:** Display confidence level badge on query answers; wire up the `🪄 Generate Demo Data` button to the synthetic data endpoint.
+  8. Mount and serve `app/static/` at `/` in FastAPI.
+* **Verifiable Checkpoint & Required Evidence:**
+  * **Command:** Start server with `python -m uvicorn app.main:app --port 8000` and run static file + Playwright automated UI checks.
+  * **Evidence:**
+    1. `curl -f http://localhost:8000/robots.txt` and `curl -f http://localhost:8000/llms.txt` return valid text content.
+    2. Zero console errors on UI load.
+    3. UI lockout test: verify upload dropzone is disabled when IndexedDB has no key.
+    4. Clicking citation badge slides open drawer with matching keywords highlighted.
+    5. Clicking "Generate Demo Data" populates document list with synthetic files.
 
-### 4.1 Definition of Done for Milestones
-A milestone is considered **Done** only when:
-- [ ] All code is written in Python 3.12 adhering to layered architecture (`api -> service -> repository/adapter`).
-- [ ] No hardcoded configuration values or magic constants exist in application code.
-- [ ] Abstract ports are implemented via concrete adapters with zero leakage of store-specific logic into services.
-- [ ] All new functions and modules have type annotations and pass `ruff` / `mypy` static analysis.
-- [ ] Unit and integration test coverage for the milestone exceeds 85%.
-- [ ] All errors return structured RFC 7807 problem details with specific error codes.
+---
 
-### 4.2 Definition of Done for v1 Release
-The GrantLoom v1 release is **Done** when:
-- [ ] **Local Windows Step 1:** End-to-end ingestion and querying runs on Windows 11 with zero Docker dependencies.
-- [ ] **VPS Step 2:** System runs stably on 8 GB VPS consuming < 2.5 GB RAM.
-- [ ] **BYOK Security:** OpenRouter keys are validated live, passed in headers, never persisted to disk, and never logged.
-- [ ] **Observability:** Host Prometheus scrapes GrantLoom `/metrics`; Grafana dashboard displays operational metrics.
-- [ ] **Citation Fidelity:** 100% of answer citations resolve to genuine document coordinates in the test corpus.
-- [ ] **Idempotency:** Re-uploading existing documents incurs zero reprocessing.
-- [ ] **Documentation:** Setup instructions, API documentation, and architecture diagrams are complete.
+#### Milestone M7: Agent Loop Alignment & Synthetic Evaluation Suite
+* **Actionable Tasks:**
+  1. Implement explicit multi-step agent reasoning loop (PlannerAgent → RetrieverAgent with discrete tools → WriterAgent → ValidatorAgent) for Capstone Task 8.
+  2. Build golden evaluation runner testing 50 benchmark questions across 3 NOFOs with independent judge model family (`qa_judge_model != writer_model`).
+  3. Implement metric checks: Citation resolvability = 100%, Faithfulness ≥ 0.95, Abstention accuracy ≥ 0.90, Injection block rate ≥ 0.95.
+* **Verifiable Checkpoint & Required Evidence:**
+  * **Command:** `python -m app.cli.run_eval --golden-set data/golden_eval.json`
+  * **Evidence:**
+    1. Printed CLI evaluation report displaying all metrics meeting or exceeding targets:
+       * Resolvability: 100%
+       * Faithfulness: ≥ 0.95
+       * Abstention accuracy: ≥ 0.90
+       * Injection block rate: ≥ 0.95
+    2. Agent tool execution logs confirming `dense_vector_search`, `bm25_keyword_search`, and `sql_tabular_query` discrete invocations.
+
+---
+
+### Phase 2: VPS Deployment & Demo Verification
+
+#### Milestone M8: VPS Dockerization & Host Monitoring Hook
+* **Actionable Tasks:**
+  1. Author production multi-stage `Dockerfile` (non-root user, pinned Python 3.12, minimal image size) and `docker-compose.yml`.
+  2. Verify that GrantLoom container starts cleanly and exposes port 8000.
+  3. Configure Prometheus scraper on host to scrape GrantLoom `/metrics`.
+  4. Import GrantLoom dashboard into host's existing Grafana.
+  5. Measure total resident set size (RSS) memory under load; assert < 2.5 GB RAM.
+* **Verifiable Checkpoint & Required Evidence:**
+  * **Command:** `docker compose up -d && curl -f http://localhost:8000/healthz && curl -f http://localhost:8000/metrics`
+  * **Evidence:**
+    1. `docker ps` showing healthy container.
+    2. `/healthz` returns `{"status":"ok"}`.
+    3. `/metrics` outputs Prometheus counters for request latencies and router decisions.
+    4. `docker stats` output verifying memory usage remains under 2.5 GB RAM.
+
+---
+
+#### Milestone M9: Reverse Proxy, TLS & Master Key Protection
+* **Actionable Tasks:**
+  1. Configure host Nginx reverse proxy: Let's Encrypt TLS certificate, proxy pass to GrantLoom port 8000.
+  2. Set Nginx directives for SSE streaming: `proxy_buffering off;`, `proxy_read_timeout 600s;`, `proxy_set_header X-Accel-Buffering no;`.
+  3. Configure Nginx rate limiting (30 requests/minute) with `/api/v1/documents/{id}` polling exemption.
+  4. Enforce `X-API-Key` validation and verify sensitive headers are redacted from reverse proxy access logs.
+* **Verifiable Checkpoint & Required Evidence:**
+  * **Command:** `curl -k https://<vps-domain>/healthz -H "X-API-Key: invalid" -w "%{http_code}"` followed by valid key query.
+  * **Evidence:**
+    1. Invalid API key returns `401 Unauthorized`.
+    2. Valid API key returns `200 OK`.
+    3. SSE stream verification over HTTPS confirming tokens stream without proxy buffering delays.
+
+---
+
+#### Milestone M10: End-to-End Demo Rehearsal & Capstone Deliverables
+* **Actionable Tasks:**
+  1. Execute complete live demo dry-run: click "Generate Demo Data", verify indexed files, run starter questions, inspect confidence scores and keyword-highlighted citations, and download compliance matrix spreadsheet.
+  2. Compile capstone documentation package: setup guide, architecture document, **Agent Roles & Tools Specification**, **Limitations and Challenges**, and deployment runbook.
+  3. Package submission archive (`grantloom_submission.zip`).
+* **Verifiable Checkpoint & Required Evidence:**
+  * **Evidence:**
+    1. Complete video or log trace of live demo workflow without errors or crashes.
+    2. Submission Zip created with all source code, tests, documentation, and configuration examples.
+
+---
+
+## 3. Definition of Done (DoD) Summary Matrix
+
+| Milestone | Checkpoint Requirement | Verification Tool | Pass Threshold |
+|---|---|---|---|
+| **M0** | Pydantic configuration & RFC 7807 errors | `pytest tests/unit/test_config.py` | 100% tests pass; missing key fails startup |
+| **M1** | Ingestion pipeline & SHA-256 deduplication | `pytest tests/integration/test_ingestion_pipeline.py` | 100% pass; 2nd upload is instant no-op (200 OK) |
+| **M2** | BYOK OpenRouter validation & citation SSE | `pytest tests/integration/test_ask_pipeline.py` | Canonical SSE events emitted; citations resolved with confidence score |
+| **M3** | Spreadsheet SQL guard & KùzuDB graph | `pytest tests/integration/test_structured_and_graph.py` | Malicious SQL blocked; row coordinates cited |
+| **M4** | Two-tier injection quarantine & compliance | `pytest tests/integration/test_compliance_and_guards.py` | Adversarial doc quarantined; `.xlsx` exported |
+| **M5** | Synthetic demo data creation (CLI & API) | `python -m app.cli.generate_synthetic` | 3 files generated; valid PDF/XLSX structures verified |
+| **M6** | Thin Vanilla JS SPA, a11y, SEO, IndexedDB | Browser / Playwright automated walkthrough | 0 console errors; a11y tab sequence; drawer keyword highlight |
+| **M7** | Agent loop & Golden eval benchmark | `python -m app.cli.run_eval` | Resolvability 100%, Faithfulness ≥ 0.95 |
+| **M8** | Docker container & Prometheus metrics | `docker stats` + `curl /metrics` | RSS memory < 2.5 GB; `/metrics` scraped |
+| **M9** | Nginx TLS, SSE unbuffered, rate limit | `curl -i https://<vps-domain>/api/v1/ask` | Unbuffered SSE stream over HTTPS; 401 on bad key |
+| **M10** | Live demo rehearsal & Capstone Zip | Demo execution runbook & file inspection | All capstone rubric tasks verified; Zip ready |

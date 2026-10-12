@@ -214,19 +214,22 @@ To fulfill the capstone requirements for **agent-based planning, tool retrieval,
 | ID | Requirement | Acceptance Criteria | MoSCoW |
 |---|---|---|---|
 | **FR-U1** | **Zero-Build Vanilla JS SPA** | Frontend built as clean HTML5, CSS3, and modern Vanilla JS (ES Modules) with zero node build steps, served statically by FastAPI. Streamlit is prohibited. | Must |
-| **FR-U2** | **Document Management UI** | Drag-and-drop file upload zone, active document table with status badges (`uploading`, `extracting`, `active`, `quarantined`), and document deletion controls. | Must |
-| **FR-U3** | **Streaming Chat & Citation Badges** | Conversational chat interface displaying real-time SSE progress indicators, streaming markdown responses, and inline clickable citation badges. | Must |
-| **FR-U4** | **Citation Excerpt Preview Modal** | Clicking any citation badge opens a modal displaying the exact document excerpt, file name, page number, and source coordinate. | Must |
+| **FR-U2** | **Document Management UI** | Accessible drag-and-drop file upload zone, active document table with status badges (`uploading`, `extracting`, `active`, `quarantined`), and document deletion controls. | Must |
+| **FR-U3** | **Streaming Chat & Confidence Score** | Conversational chat interface displaying real-time SSE progress indicators, streaming markdown responses, inline clickable citation badges, and a query confidence level badge (`High`, `Moderate`, `Low`). | Must |
+| **FR-U4** | **Citation Excerpt Drawer with Keyword Highlighting** | Clicking any citation badge slides open an excerpt drawer displaying the exact source text, page/row coordinate, and query search keywords wrapped in `<mark class="kw-highlight">`. | Must |
 | **FR-U5** | **Compliance Matrix Dashboard** | Dedicated table view rendering solicitation requirements, evidence status badges (`Satisfied`, `Partial`, `Gap`), and a one-click **Export to Excel** button. | Must |
-| **FR-U6** | **Credential Storage** | Modal allowing user to enter OpenRouter API key and Server Master Key. Stored exclusively in browser `sessionStorage` (or `localStorage`), never transmitted in URL query parameters. | Must |
+| **FR-U6** | **IndexedDB Credential Security & Lockout** | API keys stored in browser IndexedDB. Live validation executes upon entry; ingestion dropzone and query input remain locked until a valid OpenRouter key or Ollama connection is confirmed. | Must |
+| **FR-U7** | **Keyboard-Only Navigation & WCAG AA** | Complete keyboard navigation support with logical Tab sequence, skip-to-content link, high-contrast focus rings, and focus traps inside modals and slide-over drawers. | Must |
+| **FR-U8** | **Ollama Local Model Probe & Context Scaling** | UI supports switching to local Ollama; enumerates local models via `/api/tags`, executes a diagnostic tool-calling probe, and dynamically adjusts the context retrieval window. | Should |
 
-### 6.7 Operations & Observability (FR-O)
+### 6.7 Operations, Demo Tooling & SEO (FR-O)
 
 | ID | Requirement | Acceptance Criteria | MoSCoW |
 |---|---|---|---|
 | **FR-O1** | **Starter Questions Endpoint** | `GET /api/v1/examples` serves curated domain questions from `config/example_questions.json`. | Must |
 | **FR-O2** | **Host Prometheus Metrics** | `/metrics` endpoint exposes Prometheus counters and histograms for request latency, router decisions, guardrail verdicts, and index sizes. Compatible with host scraper. | Must |
-| **FR-O3** | **Synthetic Data Generator CLI** | Standalone script (`python -m app.cli.generate_synthetic_docs`) generates realistic sample NOFOs and lab proposals for local evaluation without committing docs to Git. | Should |
+| **FR-O3** | **Synthetic Demo Data Generator (CLI & API)** | CLI script (`python -m app.cli.generate_synthetic`) and API endpoint (`POST /api/v1/admin/generate-synthetic-data`) generate and index realistic demo NOFOs, past proposals, and budget sheets on demand. | Must |
+| **FR-O4** | **SEO & AI Crawler Artifacts** | Static root endpoints serve `/robots.txt`, `/sitemap.xml`, and `/llms.txt` for search indexers and AI assistants. | Must |
 
 ---
 
@@ -320,6 +323,9 @@ To fulfill the capstone requirements for **agent-based planning, tool retrieval,
 | `POST` | `/api/v1/compliance/{id}` | `X-API-Key`, `X-OpenRouter-Key` | None | `200 OK` (JSON compliance matrix & scorecard) | 401, 402, 404 | FR-C1, FR-C2 |
 | `GET` | `/api/v1/compliance/{id}/export` | `X-API-Key` | None | `200 OK` (`application/vnd.openxmlformats...`) | 401, 404 | FR-C4 |
 | `GET` | `/api/v1/examples` | `X-API-Key` | None | `200 OK` (list of curated starter questions) | 401 | FR-O1 |
+| `POST` | `/api/v1/admin/generate-synthetic-data` | `X-API-Key` | None | `202 Accepted` (generates & indexes demo files) | 401 | FR-O3 |
+| `POST` | `/api/v1/admin/test-model-capabilities` | `X-API-Key` | JSON: `{ "endpoint": "...", "model": "..." }` | `200 OK` (`{ "tool_calling": true/false }`) | 400, 401 | FR-U8 |
+| `GET` | `/robots.txt`, `/sitemap.xml`, `/llms.txt` | None | None | `200 OK` (text/xml search and AI crawler metadata) | None | FR-O4 |
 | `GET` | `/metrics` | None (or basic auth) | None | `200 OK` (Prometheus text format) | None | FR-O2 |
 | `GET` | `/healthz` | None | None | `200 OK` (`{ "status": "ok" }`) | None | FR-O2 |
 | `GET` | `/readyz` | None | None | `200 OK` (store connectivity confirmed) | 503 | FR-O2 |
