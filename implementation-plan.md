@@ -39,28 +39,34 @@ Every milestone contains **Actionable Tasks** and a **Verifiable Checkpoint & Re
 
 #### Milestone M0: Foundations & Architecture Scaffolding
 * **Actionable Tasks:**
-  1. Initialize Python 3.12 virtual environment and `pyproject.toml` with pinned dependencies (`fastapi`, `uvicorn`, `pydantic`, `chromadb`, `kuzu`, `openpyxl`, `pypdf`, `httpx`, `prometheus-client`, `slowapi`, `pytest`, `pytest-asyncio`).
+  1. Initialize Python 3.12+ virtual environment and `pyproject.toml` with pinned dependencies (`fastapi`, `uvicorn`, `pydantic`, `alembic`, `sqlalchemy`, `chromadb`, `kuzu`, `openpyxl`, `pypdf`, `reportlab`, `httpx`, `prometheus-client`, `slowapi`, `pytest`, `pytest-asyncio`).
   2. Implement `app/core/config.py`: typed Pydantic V2 loader parsing `config/config.json` and `.env` with strict validation (no in-code defaults).
   3. Create `config/config.json` default schema and `.env.example`.
   4. Implement `app/ports/`: abstract interfaces (`VectorStorePort`, `GraphStorePort`, `StructuredStorePort`, `RegistryPort`, `LLMClientPort`, `EmbedderPort`, `DecisionBackendPort`).
   5. Implement `app/core/errors.py`: RFC 7807 problem details exception hierarchy with stable error codes.
+  6. **Database Migration Framework (Liquibase equivalent for Python):**
+     * Configure Alembic migration infrastructure (`alembic.ini`, `alembic/env.py`, `alembic/versions/`).
+     * Implement `app/db/migrator.py`: programmatic migration runner executing `upgrade head` on application startup and exposing a CLI command (`python -m app.cli.db upgrade head` / `downgrade -1`).
+     * Verify database schema changes are strictly versioned via changelog scripts rather than unstructured `CREATE TABLE IF NOT EXISTS` calls.
 * **Verifiable Checkpoint & Required Evidence:**
-  * **Command:** `pytest tests/unit/test_config.py tests/unit/test_errors.py`
+  * **Command:** `pytest tests/unit/test_config.py tests/unit/test_errors.py tests/unit/test_migrations.py`
   * **Evidence:**
     1. Test report showing 100% pass for valid config loading, missing key rejection, and RFC 7807 problem formatting.
     2. CLI run proof demonstrating that running `python -c "from app.core.config import get_settings; print(get_settings().limits.max_documents)"` prints `50`.
+    3. Migration test asserting `alembic upgrade head` runs cleanly on an empty SQLite database, creates the `alembic_version` tracking table, and allows programmatic status inspection.
 
 ---
 
 #### Milestone M1: Registry, Ingestion Pipeline & Embedded Stores
 * **Actionable Tasks:**
-  1. Build SQLite registry and outbox tables in `app/adapters/sqlite_registry.py` with WAL mode and transaction locking.
-  2. Implement `app/services/ingest_service.py`: streaming SHA-256 computation on upload with instant deduplication (same hash = `200 OK`; in-flight = `202 Accepted`).
-  3. Implement extractors: PDF via `pypdf` (text layer + `pdfplumber` fallback for tables), TXT, and XLSX via `openpyxl`.
-  4. Implement page-aware, section-aware chunker producing deterministic chunk IDs (`doc_id:page:index`). Ensure PDF chunks never span pages.
-  5. Implement `app/adapters/chroma_adapter.py`: in-process ChromaDB persistent client indexing dense vectors with **default ONNX embedder explicitly disabled** (`embedding_function=None`).
-  6. Implement background worker loop polling SQLite outbox and advancing states (`uploaded → extracting → chunking → embedding → active`).
-  7. Implement API routes: `POST /api/v1/documents` and `GET /api/v1/documents/{id}` polling endpoint.
+  1. Author versioned Alembic migration `0001_initial_registry_and_outbox.py` defining document registry, outbox queue, chunk metadata, and audit log tables with WAL mode, foreign keys, and indexes.
+  2. Build SQLite registry and outbox repository in `app/adapters/sqlite_registry.py` operating over the migrated schema with transaction locking.
+  3. Implement `app/services/ingest_service.py`: streaming SHA-256 computation on upload with instant deduplication (same hash = `200 OK`; in-flight = `202 Accepted`).
+  4. Implement extractors: PDF via `pypdf` (text layer + `pdfplumber` fallback for tables), TXT, and XLSX via `openpyxl`.
+  5. Implement page-aware, section-aware chunker producing deterministic chunk IDs (`doc_id:page:index`). Ensure PDF chunks never span pages.
+  6. Implement `app/adapters/chroma_adapter.py`: in-process ChromaDB persistent client indexing dense vectors with **default ONNX embedder explicitly disabled** (`embedding_function=None`).
+  7. Implement background worker loop polling SQLite outbox and advancing states (`uploaded → extracting → chunking → embedding → active`).
+  8. Implement API routes: `POST /api/v1/documents` and `GET /api/v1/documents/{id}` polling endpoint.
 * **Verifiable Checkpoint & Required Evidence:**
   * **Command:** `pytest tests/integration/test_ingestion_pipeline.py`
   * **Evidence:**
@@ -224,8 +230,8 @@ Every milestone contains **Actionable Tasks** and a **Verifiable Checkpoint & Re
 
 | Milestone | Checkpoint Requirement | Verification Tool | Pass Threshold |
 |---|---|---|---|
-| **M0** | Pydantic configuration & RFC 7807 errors | `pytest tests/unit/test_config.py` | 100% tests pass; missing key fails startup |
-| **M1** | Ingestion pipeline & SHA-256 deduplication | `pytest tests/integration/test_ingestion_pipeline.py` | 100% pass; 2nd upload is instant no-op (200 OK) |
+| **M0** | Pydantic configuration, RFC 7807 errors & Alembic DB migrations | `pytest tests/unit/test_config.py tests/unit/test_migrations.py` | 100% tests pass; missing key fails startup; Alembic applies cleanly |
+| **M1** | Ingestion pipeline, Alembic schema & SHA-256 deduplication | `pytest tests/integration/test_ingestion_pipeline.py` | 100% pass; migrated tables verified; 2nd upload is instant no-op (200 OK) |
 | **M2** | BYOK OpenRouter validation & citation SSE | `pytest tests/integration/test_ask_pipeline.py` | Canonical SSE events emitted; citations resolved with confidence score |
 | **M3** | Spreadsheet SQL guard & KùzuDB graph | `pytest tests/integration/test_structured_and_graph.py` | Malicious SQL blocked; row coordinates cited |
 | **M4** | Two-tier injection quarantine & compliance | `pytest tests/integration/test_compliance_and_guards.py` | Adversarial doc quarantined; `.xlsx` exported |
