@@ -149,3 +149,33 @@ class DatabaseMigrationError(GrantLoomError):
     default_status = 500
     default_title = "Database Migration Failure"
     default_code = ErrorCode.DATABASE_MIGRATION_ERROR
+
+
+class StorageError(GrantLoomError):
+    default_status = 500
+    default_title = "Storage Error"
+    default_code = ErrorCode.DATABASE_ERROR
+
+
+class DocumentLimitExceededError(GrantLoomError):
+    default_status = 400
+    default_title = "Document Capacity Limit Exceeded"
+    default_code = ErrorCode.PAYLOAD_TOO_LARGE
+
+
+class ExtractionError(GrantLoomError):
+    default_status = 422
+    default_title = "Document Parsing Error"
+    default_code = ErrorCode.DOCUMENT_PARSE_FAILED
+
+
+class LLMInferenceError(GrantLoomError):
+    default_status = 502
+    default_title = "LLM Inference Error"
+    default_code = ErrorCode.UPSTREAM_SERVICE_ERROR
+
+
+class DocumentNotFoundError(NotFoundError):
+    default_status = 404
+    default_title = "Document Not Found"
+    default_code = ErrorCode.DOC_NOT_FOUND

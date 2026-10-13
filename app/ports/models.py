@@ -50,7 +50,39 @@ class DocumentRecord:
     state: str  # uploaded, extracting, chunking, embedding, active, quarantined, deleting
     version: int
     created_at: str
+    file_path: str = ""
+    error_message: Optional[str] = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class DocumentChunk:
+    chunk_id: str
+    doc_id: str
+    chunk_index: int
+    page_number: int = 1
+    sheet_name: Optional[str] = None
+    row_start: Optional[int] = None
+    row_end: Optional[int] = None
+    line_start: Optional[int] = None
+    line_end: Optional[int] = None
+    char_count: int = 0
+    token_count: int = 0
+    text_content: str = ""
+    content_hash: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class OutboxJob:
+    job_id: str
+    doc_id: str
+    stage: str  # extracting, chunking, embedding, done, failed
+    status: str  # pending, in_progress, completed, failed
+    attempts: int = 0
+    last_error: Optional[str] = None
+    created_at: str = ""
+    updated_at: str = ""
 
 
 @dataclass

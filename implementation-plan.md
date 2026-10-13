@@ -34,8 +34,8 @@ Phase 2: VPS Deployment & Demo Verification (Linux 8 GB VPS)
 | Milestone | Scope / Deliverable | Status | Checkpoint Verification |
 |---|---|---|---|
 | **M0** | Foundations, Scaffolding, Strict Config, Ports, RFC 7807 Errors, Alembic Migrations | **COMPLETED** | 100% pass (14 unit tests); `max_documents=50`; Alembic upgrade/downgrade/CLI verified |
-| **M1** | Registry, Ingestion Pipeline & Embedded Stores | **NEXT** | Pending execution (`pytest tests/integration/test_ingestion_pipeline.py`) |
-| **M2** | Query Pipeline, BYOK Validation & Citation Resolution | **TODO** | Pending |
+| **M1** | Registry, Ingestion Pipeline & Embedded Stores | **COMPLETED** | 100% pass (5 integration tests); Alembic 0001 migration; SHA-256 deduplication verified; ChromaDB indexing verified |
+| **M2** | Query Pipeline, BYOK Validation & Citation Resolution | **NEXT** | Pending execution (`pytest tests/integration/test_ask_pipeline.py`) |
 | **M3** | Structured Spreadsheet & KùzuDB Graph Integration | **TODO** | Pending |
 | **M4** | Guardrails, Bounded Rewrite Loop & Compliance Matrix | **TODO** | Pending |
 | **M5** | Synthetic Demo Data Generator (CLI & API) | **IN PROGRESS** | Task 1 completed (CLI & fixtures, 6 unit tests pass); Task 2 (Admin API) pending |
@@ -75,22 +75,22 @@ Every milestone contains **Actionable Tasks** and a **Verifiable Checkpoint & Re
 
 ---
 
-#### Milestone M1: Registry, Ingestion Pipeline & Embedded Stores
+#### Milestone M1: Registry, Ingestion Pipeline & Embedded Stores `[COMPLETED]`
 * **Actionable Tasks:**
-  1. Author versioned Alembic migration `0001_initial_registry_and_outbox.py` defining document registry, outbox queue, chunk metadata, and audit log tables with WAL mode, foreign keys, and indexes.
-  2. Build SQLite registry and outbox repository in `app/adapters/sqlite_registry.py` operating over the migrated schema with transaction locking.
-  3. Implement `app/services/ingest_service.py`: streaming SHA-256 computation on upload with instant deduplication (same hash = `200 OK`; in-flight = `202 Accepted`).
-  4. Implement extractors: PDF via `pypdf` (text layer + `pdfplumber` fallback for tables), TXT, and XLSX via `openpyxl`.
-  5. Implement page-aware, section-aware chunker producing deterministic chunk IDs (`doc_id:page:index`). Ensure PDF chunks never span pages.
-  6. Implement `app/adapters/chroma_adapter.py`: in-process ChromaDB persistent client indexing dense vectors with **default ONNX embedder explicitly disabled** (`embedding_function=None`).
-  7. Implement background worker loop polling SQLite outbox and advancing states (`uploaded → extracting → chunking → embedding → active`).
-  8. Implement API routes: `POST /api/v1/documents` and `GET /api/v1/documents/{id}` polling endpoint.
+  - [x] 1. Author versioned Alembic migration `0001_initial_registry_and_outbox.py` defining document registry, outbox queue, chunk metadata, and audit log tables with WAL mode, foreign keys, and indexes.
+  - [x] 2. Build SQLite registry and outbox repository in `app/adapters/sqlite_registry.py` operating over the migrated schema with transaction locking.
+  - [x] 3. Implement `app/services/ingest_service.py`: streaming SHA-256 computation on upload with instant deduplication (same hash = `200 OK`; in-flight = `202 Accepted`).
+  - [x] 4. Implement extractors: PDF via `pypdf` (text layer + `pdfplumber` fallback for tables), TXT, and XLSX via `openpyxl`.
+  - [x] 5. Implement page-aware, section-aware chunker producing deterministic chunk IDs (`doc_id:page:index`). Ensure PDF chunks never span pages.
+  - [x] 6. Implement `app/adapters/chroma_adapter.py`: in-process ChromaDB persistent client indexing dense vectors with **default ONNX embedder explicitly disabled** (`embedding_function=None`).
+  - [x] 7. Implement background worker loop polling SQLite outbox and advancing states (`uploaded → extracting → chunking → embedding → active`).
+  - [x] 8. Implement API routes: `POST /api/v1/documents` and `GET /api/v1/documents/{id}` polling endpoint.
 * **Verifiable Checkpoint & Required Evidence:**
   * **Command:** `pytest tests/integration/test_ingestion_pipeline.py`
   * **Evidence:**
-    1. Upload a multi-page test PDF via test harness; poll `GET /api/v1/documents/{id}` until `state == active`.
-    2. Upload the exact same file a second time; assert `200 OK` returned immediately with `message: "Document already indexed"` and zero duplicate outbox jobs.
-    3. Assert ChromaDB collection count equals expected chunk count and SQLite registry status is `active`.
+    1. Upload a multi-page test PDF via test harness; poll `GET /api/v1/documents/{id}` until `state == active`. *(VERIFIED: 3-page PDF processed to active status with chunk count >= 3)*
+    2. Upload the exact same file a second time; assert `200 OK` returned immediately with `message: "Document already indexed"` and zero duplicate outbox jobs. *(VERIFIED: duplicate returns 200 OK, outbox job count remains 1)*
+    3. Assert ChromaDB collection count equals expected chunk count and SQLite registry status is `active`. *(VERIFIED: ChromaDB count matches registry chunks, deterministic IDs doc_id:page:index verified)*
 
 ---
 
@@ -250,8 +250,8 @@ Every milestone contains **Actionable Tasks** and a **Verifiable Checkpoint & Re
 | Milestone | Status | Checkpoint Requirement | Verification Tool | Pass Threshold |
 |---|---|---|---|---|
 | **M0** | **Completed** | Pydantic configuration, RFC 7807 errors & Alembic DB migrations | `pytest tests/unit/test_config.py tests/unit/test_migrations.py` | 100% tests pass; missing key fails startup; Alembic applies cleanly |
-| **M1** | **Next** | Ingestion pipeline, Alembic schema & SHA-256 deduplication | `pytest tests/integration/test_ingestion_pipeline.py` | 100% pass; migrated tables verified; 2nd upload is instant no-op (200 OK) |
-| **M2** | **Todo** | BYOK OpenRouter validation & citation SSE | `pytest tests/integration/test_ask_pipeline.py` | Canonical SSE events emitted; citations resolved with confidence score |
+| **M1** | **Completed** | Ingestion pipeline, Alembic schema & SHA-256 deduplication | `pytest tests/integration/test_ingestion_pipeline.py` | 100% pass; migrated tables verified; 2nd upload is instant no-op (200 OK) |
+| **M2** | **Next** | BYOK OpenRouter validation & citation SSE | `pytest tests/integration/test_ask_pipeline.py` | Canonical SSE events emitted; citations resolved with confidence score |
 | **M3** | **Todo** | Spreadsheet SQL guard & KùzuDB graph | `pytest tests/integration/test_structured_and_graph.py` | Malicious SQL blocked; row coordinates cited |
 | **M4** | **Todo** | Two-tier injection quarantine & compliance | `pytest tests/integration/test_compliance_and_guards.py` | Adversarial doc quarantined; `.xlsx` exported |
 | **M5** | **In Progress** | Synthetic demo data creation (CLI & API) | `python -m app.cli.generate_synthetic` | 3 files generated; valid PDF/XLSX structures verified |

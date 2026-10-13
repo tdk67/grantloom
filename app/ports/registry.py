@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, Optional, Sequence
 
-from app.ports.models import DocumentRecord
+from app.ports.models import DocumentChunk, DocumentRecord, OutboxJob
 
 
 class RegistryPort(ABC):
@@ -37,6 +37,8 @@ class RegistryPort(ABC):
         doc_id: str,
         state: str,
         metadata_update: Optional[dict[str, Any]] = None,
+        error_message: Optional[str] = None,
+        page_count: Optional[int] = None,
     ) -> None:
         """Transition document state machine (e.g. uploaded -> extracting -> active)."""
         ...
@@ -44,4 +46,49 @@ class RegistryPort(ABC):
     @abstractmethod
     def delete_document(self, doc_id: str) -> None:
         """Remove document record from the registry."""
+        ...
+
+    @abstractmethod
+    def count_documents(self) -> int:
+        """Return total active/registered document count."""
+        ...
+
+    @abstractmethod
+    def create_outbox_job(self, doc_id: str, stage: str = "extracting") -> str:
+        """Enqueue a background outbox processing job."""
+        ...
+
+    @abstractmethod
+    def claim_next_job(self) -> Optional[OutboxJob]:
+        """Claim the next pending outbox job atomically."""
+        ...
+
+    @abstractmethod
+    def update_job_status(
+        self,
+        job_id: str,
+        status: str,
+        error: Optional[str] = None,
+    ) -> None:
+        """Update outbox job status and error if any."""
+        ...
+
+    @abstractmethod
+    def complete_job(self, job_id: str) -> None:
+        """Mark outbox job completed and remove from pending queue."""
+        ...
+
+    @abstractmethod
+    def save_chunks(self, chunks: Sequence[DocumentChunk]) -> None:
+        """Batch persist extracted document chunks with coordinates."""
+        ...
+
+    @abstractmethod
+    def get_chunks_for_document(self, doc_id: str) -> list[DocumentChunk]:
+        """Fetch all chunks belonging to a document."""
+        ...
+
+    @abstractmethod
+    def get_chunk(self, chunk_id: str) -> Optional[DocumentChunk]:
+        """Fetch single chunk by chunk ID."""
         ...
