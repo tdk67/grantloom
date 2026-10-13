@@ -29,7 +29,25 @@ Phase 2: VPS Deployment & Demo Verification (Linux 8 GB VPS)
 
 ---
 
-## 2. Milestone Breakdown with Verifiable Checkpoints
+## 2. Implementation Progress Ledger
+
+| Milestone | Scope / Deliverable | Status | Checkpoint Verification |
+|---|---|---|---|
+| **M0** | Foundations, Scaffolding, Strict Config, Ports, RFC 7807 Errors, Alembic Migrations | **COMPLETED** | 100% pass (14 unit tests); `max_documents=50`; Alembic upgrade/downgrade/CLI verified |
+| **M1** | Registry, Ingestion Pipeline & Embedded Stores | **NEXT** | Pending execution (`pytest tests/integration/test_ingestion_pipeline.py`) |
+| **M2** | Query Pipeline, BYOK Validation & Citation Resolution | **TODO** | Pending |
+| **M3** | Structured Spreadsheet & KùzuDB Graph Integration | **TODO** | Pending |
+| **M4** | Guardrails, Bounded Rewrite Loop & Compliance Matrix | **TODO** | Pending |
+| **M5** | Synthetic Demo Data Generator (CLI & API) | **IN PROGRESS** | Task 1 completed (CLI & fixtures, 6 unit tests pass); Task 2 (Admin API) pending |
+| **M6** | Thin Frontend Implementation (Vanilla JS SPA) | **TODO** | Pending |
+| **M7** | Agent Loop Alignment & Synthetic Evaluation Suite | **TODO** | Pending |
+| **M8** | VPS Dockerization & Host Monitoring Hook | **TODO** | Pending |
+| **M9** | Reverse Proxy, TLS & Master Key Protection | **TODO** | Pending |
+| **M10** | End-to-End Demo Rehearsal & Capstone Deliverables | **TODO** | Pending |
+
+---
+
+## 3. Milestone Breakdown with Verifiable Checkpoints
 
 Every milestone contains **Actionable Tasks** and a **Verifiable Checkpoint & Required Evidence**. The code generator must execute the verification commands and output the required evidence before declaring a milestone complete.
 
@@ -37,23 +55,23 @@ Every milestone contains **Actionable Tasks** and a **Verifiable Checkpoint & Re
 
 ### Phase 1: Native Windows Development (Zero Docker)
 
-#### Milestone M0: Foundations & Architecture Scaffolding
+#### Milestone M0: Foundations & Architecture Scaffolding `[COMPLETED]`
 * **Actionable Tasks:**
-  1. Initialize Python 3.12+ virtual environment and `pyproject.toml` with pinned dependencies (`fastapi`, `uvicorn`, `pydantic`, `alembic`, `sqlalchemy`, `chromadb`, `kuzu`, `openpyxl`, `pypdf`, `reportlab`, `httpx`, `prometheus-client`, `slowapi`, `pytest`, `pytest-asyncio`).
-  2. Implement `app/core/config.py`: typed Pydantic V2 loader parsing `config/config.json` and `.env` with strict validation (no in-code defaults).
-  3. Create `config/config.json` default schema and `.env.example`.
-  4. Implement `app/ports/`: abstract interfaces (`VectorStorePort`, `GraphStorePort`, `StructuredStorePort`, `RegistryPort`, `LLMClientPort`, `EmbedderPort`, `DecisionBackendPort`).
-  5. Implement `app/core/errors.py`: RFC 7807 problem details exception hierarchy with stable error codes.
-  6. **Database Migration Framework (Liquibase equivalent for Python):**
-     * Configure Alembic migration infrastructure (`alembic.ini`, `alembic/env.py`, `alembic/versions/`).
-     * Implement `app/db/migrator.py`: programmatic migration runner executing `upgrade head` on application startup and exposing a CLI command (`python -m app.cli.db upgrade head` / `downgrade -1`).
-     * Verify database schema changes are strictly versioned via changelog scripts rather than unstructured `CREATE TABLE IF NOT EXISTS` calls.
+  - [x] 1. Initialize Python 3.12+ virtual environment and `pyproject.toml` with pinned dependencies (`fastapi`, `uvicorn`, `pydantic`, `alembic`, `sqlalchemy`, `chromadb`, `kuzu`, `openpyxl`, `pypdf`, `reportlab`, `httpx`, `prometheus-client`, `slowapi`, `pytest`, `pytest-asyncio`).
+  - [x] 2. Implement `app/core/config.py`: typed Pydantic V2 loader parsing `config/config.json` and `.env` with strict validation (no in-code defaults).
+  - [x] 3. Create `config/config.json` default schema and `.env.example`.
+  - [x] 4. Implement `app/ports/`: abstract interfaces (`VectorStorePort`, `GraphStorePort`, `StructuredStorePort`, `RegistryPort`, `LLMClientPort`, `EmbedderPort`, `DecisionBackendPort`).
+  - [x] 5. Implement `app/core/errors.py`: RFC 7807 problem details exception hierarchy with stable error codes.
+  - [x] 6. **Database Migration Framework (Liquibase equivalent for Python):**
+     * [x] Configure Alembic migration infrastructure (`alembic.ini`, `alembic/env.py`, `alembic/versions/`).
+     * [x] Implement `app/db/migrator.py`: programmatic migration runner executing `upgrade head` on application startup and exposing a CLI command (`python -m app.cli.db upgrade head` / `downgrade -1`).
+     * [x] Verify database schema changes are strictly versioned via changelog scripts rather than unstructured `CREATE TABLE IF NOT EXISTS` calls.
 * **Verifiable Checkpoint & Required Evidence:**
   * **Command:** `pytest tests/unit/test_config.py tests/unit/test_errors.py tests/unit/test_migrations.py`
   * **Evidence:**
-    1. Test report showing 100% pass for valid config loading, missing key rejection, and RFC 7807 problem formatting.
-    2. CLI run proof demonstrating that running `python -c "from app.core.config import get_settings; print(get_settings().limits.max_documents)"` prints `50`.
-    3. Migration test asserting `alembic upgrade head` runs cleanly on an empty SQLite database, creates the `alembic_version` tracking table, and allows programmatic status inspection.
+    1. Test report showing 100% pass for valid config loading, missing key rejection, and RFC 7807 problem formatting. *(VERIFIED: 14/14 tests pass)*
+    2. CLI run proof demonstrating that running `python -c "from app.core.config import get_settings; print(get_settings().limits.max_documents)"` prints `50`. *(VERIFIED: prints 50)*
+    3. Migration test asserting `alembic upgrade head` runs cleanly on an empty SQLite database, creates the `alembic_version` tracking table, and allows programmatic status inspection. *(VERIFIED: test_migration_upgrade_and_inspection and CLI pass)*
 
 ---
 
@@ -126,19 +144,20 @@ Every milestone contains **Actionable Tasks** and a **Verifiable Checkpoint & Re
 
 ---
 
-#### Milestone M5: Synthetic Demo Data Generator (CLI & Admin Endpoint)
+#### Milestone M5: Synthetic Demo Data Generator (CLI & Admin Endpoint) `[IN PROGRESS]`
 * **Actionable Tasks:**
-  1. Implement `app/cli/generate_synthetic.py`: standalone CLI utility generating high-fidelity demo grant documents into a local directory:
+  - [x] 1. Implement `app/cli/generate_synthetic.py`: standalone CLI utility generating high-fidelity demo grant documents into a local directory:
      * `DOE_Solar_2026_Sample.pdf`: 25-page solicitation containing cost match (20%), equipment threshold ($50,000), and PI eligibility requirements.
      * `Past_Proposal_2024_Sample.pdf`: 15-page past lab proposal citing Dr. Elena Vance's facilities and biosketch.
      * `Lab_Budget_2025_Sample.xlsx`: 3-sheet budget spreadsheet with Personnel, Travel, and Equipment breakdowns.
-  2. Implement administrative endpoint `POST /api/v1/admin/generate-synthetic-data`: triggers synthetic file generation and automatically ingests them into the SQLite registry and index stores.
+     *(VERIFIED: 6/6 unit tests pass, files generated in data/synthetic)*
+  - [ ] 2. Implement administrative endpoint `POST /api/v1/admin/generate-synthetic-data`: triggers synthetic file generation and automatically ingests them into the SQLite registry and index stores.
 * **Verifiable Checkpoint & Required Evidence:**
   * **Command:** `python -m app.cli.generate_synthetic --output-dir data/test_synthetic && pytest tests/unit/test_synthetic_generator.py`
   * **Evidence:**
-    1. Verify generated files exist on disk: `DOE_Solar_2026_Sample.pdf`, `Past_Proposal_2024_Sample.pdf`, `Lab_Budget_2025_Sample.xlsx`.
-    2. Assert PDF text layer contains verifiable target keywords and XLSX contains valid numeric cells.
-    3. Endpoint test confirming `POST /api/v1/admin/generate-synthetic-data` indexes all 3 documents to `active` state.
+    1. Verify generated files exist on disk: `DOE_Solar_2026_Sample.pdf`, `Past_Proposal_2024_Sample.pdf`, `Lab_Budget_2025_Sample.xlsx`. *(VERIFIED)*
+    2. Assert PDF text layer contains verifiable target keywords and XLSX contains valid numeric cells. *(VERIFIED)*
+    3. Endpoint test confirming `POST /api/v1/admin/generate-synthetic-data` indexes all 3 documents to `active` state. *(PENDING: Task 2 endpoint)*
 
 ---
 
@@ -226,18 +245,18 @@ Every milestone contains **Actionable Tasks** and a **Verifiable Checkpoint & Re
 
 ---
 
-## 3. Definition of Done (DoD) Summary Matrix
+## 4. Definition of Done (DoD) Summary Matrix
 
-| Milestone | Checkpoint Requirement | Verification Tool | Pass Threshold |
-|---|---|---|---|
-| **M0** | Pydantic configuration, RFC 7807 errors & Alembic DB migrations | `pytest tests/unit/test_config.py tests/unit/test_migrations.py` | 100% tests pass; missing key fails startup; Alembic applies cleanly |
-| **M1** | Ingestion pipeline, Alembic schema & SHA-256 deduplication | `pytest tests/integration/test_ingestion_pipeline.py` | 100% pass; migrated tables verified; 2nd upload is instant no-op (200 OK) |
-| **M2** | BYOK OpenRouter validation & citation SSE | `pytest tests/integration/test_ask_pipeline.py` | Canonical SSE events emitted; citations resolved with confidence score |
-| **M3** | Spreadsheet SQL guard & KùzuDB graph | `pytest tests/integration/test_structured_and_graph.py` | Malicious SQL blocked; row coordinates cited |
-| **M4** | Two-tier injection quarantine & compliance | `pytest tests/integration/test_compliance_and_guards.py` | Adversarial doc quarantined; `.xlsx` exported |
-| **M5** | Synthetic demo data creation (CLI & API) | `python -m app.cli.generate_synthetic` | 3 files generated; valid PDF/XLSX structures verified |
-| **M6** | Thin Vanilla JS SPA, a11y, SEO, IndexedDB | Browser / Playwright automated walkthrough | 0 console errors; a11y tab sequence; drawer keyword highlight |
-| **M7** | Agent loop & Golden eval benchmark | `python -m app.cli.run_eval` | Resolvability 100%, Faithfulness ≥ 0.95 |
-| **M8** | Docker container & Prometheus metrics | `docker stats` + `curl /metrics` | RSS memory < 2.5 GB; `/metrics` scraped |
-| **M9** | Nginx TLS, SSE unbuffered, rate limit | `curl -i https://<vps-domain>/api/v1/ask` | Unbuffered SSE stream over HTTPS; 401 on bad key |
-| **M10** | Live demo rehearsal & Capstone Zip | Demo execution runbook & file inspection | All capstone rubric tasks verified; Zip ready |
+| Milestone | Status | Checkpoint Requirement | Verification Tool | Pass Threshold |
+|---|---|---|---|---|
+| **M0** | **Completed** | Pydantic configuration, RFC 7807 errors & Alembic DB migrations | `pytest tests/unit/test_config.py tests/unit/test_migrations.py` | 100% tests pass; missing key fails startup; Alembic applies cleanly |
+| **M1** | **Next** | Ingestion pipeline, Alembic schema & SHA-256 deduplication | `pytest tests/integration/test_ingestion_pipeline.py` | 100% pass; migrated tables verified; 2nd upload is instant no-op (200 OK) |
+| **M2** | **Todo** | BYOK OpenRouter validation & citation SSE | `pytest tests/integration/test_ask_pipeline.py` | Canonical SSE events emitted; citations resolved with confidence score |
+| **M3** | **Todo** | Spreadsheet SQL guard & KùzuDB graph | `pytest tests/integration/test_structured_and_graph.py` | Malicious SQL blocked; row coordinates cited |
+| **M4** | **Todo** | Two-tier injection quarantine & compliance | `pytest tests/integration/test_compliance_and_guards.py` | Adversarial doc quarantined; `.xlsx` exported |
+| **M5** | **In Progress** | Synthetic demo data creation (CLI & API) | `python -m app.cli.generate_synthetic` | 3 files generated; valid PDF/XLSX structures verified |
+| **M6** | **Todo** | Thin Vanilla JS SPA, a11y, SEO, IndexedDB | Browser / Playwright automated walkthrough | 0 console errors; a11y tab sequence; drawer keyword highlight |
+| **M7** | **Todo** | Agent loop & Golden eval benchmark | `python -m app.cli.run_eval` | Resolvability 100%, Faithfulness ≥ 0.95 |
+| **M8** | **Todo** | Docker container & Prometheus metrics | `docker stats` + `curl /metrics` | RSS memory < 2.5 GB; `/metrics` scraped |
+| **M9** | **Todo** | Nginx TLS, SSE unbuffered, rate limit | `curl -i https://<vps-domain>/api/v1/ask` | Unbuffered SSE stream over HTTPS; 401 on bad key |
+| **M10** | **Todo** | Live demo rehearsal & Capstone Zip | Demo execution runbook & file inspection | All capstone rubric tasks verified; Zip ready |

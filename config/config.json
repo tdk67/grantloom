@@ -1,0 +1,40 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8000
+  },
+  "database": {
+    "sqlite_path": "data/grantloom.db",
+    "chroma_path": "data/chromadb",
+    "kuzu_path": "data/kuzudb"
+  },
+  "limits": {
+    "max_documents": 50,
+    "max_file_size_mb": 25,
+    "max_pages_per_doc": 100
+  },
+  "models": {
+    "writer_model": "anthropic/claude-3.5-sonnet",
+    "judge_model": "openai/gpt-4o-mini",
+    "embedding_model": "text-embedding-3-small"
+  },
+  "retrieval": {
+    "dense_top_k": 10,
+    "bm25_top_k": 10,
+    "rrf_k": 60,
+    "min_relevance_threshold": 0.35,
+    "rerank_top_k": 5
+  },
+  "guardrails": {
+    "max_rewrite_attempts": 2,
+    "quarantine_retention_days": 14,
+    "taint_threshold_chunks": 2
+  },
+  "llm": {
+    "private_mode": false,
+    "ollama_base_url": "http://localhost:11434"
+  },
+  "logging": {
+    "log_full_prompts": false
+  }
+}
