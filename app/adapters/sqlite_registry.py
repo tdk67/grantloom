@@ -172,6 +172,8 @@ class SqliteRegistryAdapter(RegistryPort):
         try:
             with self.engine.begin() as conn:
                 conn.execute(text("DELETE FROM chunks_fts WHERE doc_id = :doc_id"), {"doc_id": doc_id})
+                conn.execute(text("DELETE FROM document_chunks WHERE doc_id = :doc_id"), {"doc_id": doc_id})
+                conn.execute(text("DELETE FROM outbox_jobs WHERE doc_id = :doc_id"), {"doc_id": doc_id})
                 conn.execute(text("DELETE FROM documents WHERE doc_id = :doc_id"), {"doc_id": doc_id})
         except Exception as exc:
             raise StorageError(f"Failed to delete document '{doc_id}': {exc}") from exc

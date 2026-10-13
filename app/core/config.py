@@ -64,6 +64,8 @@ class LLMConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     private_mode: bool
     ollama_base_url: str
+    ollama_writer_model: str
+    ollama_judge_model: str
 
 
 class LoggingConfig(BaseModel):

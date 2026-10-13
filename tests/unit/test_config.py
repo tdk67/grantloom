@@ -18,7 +18,7 @@ def test_valid_default_config_loading():
     clear_settings_cache()
     settings = get_settings()
 
-    assert settings.server.host == "0.0.0.0"
+    assert settings.server.host == "127.0.0.1"
     assert settings.server.port == 8000
     assert settings.limits.max_documents == 50
     assert settings.limits.max_file_size_mb == 25
@@ -27,6 +27,9 @@ def test_valid_default_config_loading():
     assert settings.retrieval.rrf_k == 60
     assert settings.guardrails.max_rewrite_attempts == 2
     assert settings.llm.private_mode is False
+    assert settings.llm.ollama_base_url == "http://127.0.0.1:11434"
+    assert settings.llm.ollama_writer_model == "qwen2.5:3b"
+    assert settings.llm.ollama_judge_model == "qwen2.5:3b"
 
 
 def test_missing_key_rejection(tmp_path: Path):
@@ -56,7 +59,12 @@ def test_missing_key_rejection(tmp_path: Path):
             "quarantine_retention_days": 10,
             "taint_threshold_chunks": 2,
         },
-        "llm": {"private_mode": False, "ollama_base_url": "http://localhost:11434"},
+        "llm": {
+            "private_mode": False,
+            "ollama_base_url": "http://127.0.0.1:11434",
+            "ollama_writer_model": "test-writer-model",
+            "ollama_judge_model": "test-judge-model",
+        },
         "logging": {"log_full_prompts": False},
     }
 
@@ -98,7 +106,12 @@ def test_missing_subfield_rejection(tmp_path: Path):
             "quarantine_retention_days": 10,
             "taint_threshold_chunks": 2,
         },
-        "llm": {"private_mode": False, "ollama_base_url": "http://localhost:11434"},
+        "llm": {
+            "private_mode": False,
+            "ollama_base_url": "http://127.0.0.1:11434",
+            "ollama_writer_model": "test-writer-model",
+            "ollama_judge_model": "test-judge-model",
+        },
         "logging": {"log_full_prompts": False},
     }
 

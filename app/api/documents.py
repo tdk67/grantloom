@@ -3,14 +3,24 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, Response, UploadFile, status
 from fastapi.responses import JSONResponse
 
-from app.api.deps import get_ingest_service, get_registry, get_vector_store
+from app.api.deps import (
+    get_graph_store,
+    get_ingest_service,
+    get_registry,
+    get_structured_store,
+    get_vector_store,
+    verify_master_api_key,
+)
 from app.core.errors import DocumentNotFoundError
+from app.ports.graph_store import GraphStorePort
 from app.ports.registry import RegistryPort
+from app.ports.structured_store import StructuredStorePort
 from app.ports.vector_store import VectorStorePort
 from app.services.ingest_service import IngestionService
 
@@ -19,7 +29,7 @@ logger = logging.getLogger("grantloom.api.documents")
 router = APIRouter(prefix="/api/v1/documents", tags=["documents"])
 
 
-@router.post("", status_code=status.HTTP_202_ACCEPTED)
+@router.post("", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(verify_master_api_key)])
 async def upload_document(
     file: UploadFile = File(...),
     ingest_service: IngestionService = Depends(get_ingest_service),
@@ -107,19 +117,45 @@ async def list_documents(
     }
 
 
-@router.delete("/{doc_id}")
+@router.delete("/{doc_id}", dependencies=[Depends(verify_master_api_key)])
 async def delete_document(
     doc_id: str,
     registry: RegistryPort = Depends(get_registry),
     vector_store: VectorStorePort = Depends(get_vector_store),
+    structured_store: StructuredStorePort = Depends(get_structured_store),
+    graph_store: GraphStorePort = Depends(get_graph_store),
 ) -> dict[str, str]:
-    """Delete document and purge from vector store and registry."""
+    """Delete document and purge from vector store, registry, tabular store, graph store, and disk."""
     doc = registry.get_document(doc_id)
     if not doc:
         raise DocumentNotFoundError(f"Document with ID '{doc_id}' not found.")
 
+    # 1. Purge vectors from Chroma
     vector_store.delete_document(doc_id)
+
+    # 2. Purge tabular tables from SQLite
+    try:
+        structured_store.delete_document_tables(doc_id)
+    except Exception as t_err:
+        logger.warning("Tabular tables purge notice for doc '%s': %s", doc_id, t_err)
+
+    # 3. Purge graph nodes/edges from KùzuDB
+    try:
+        graph_store.delete_document(doc_id)
+    except Exception as g_err:
+        logger.warning("Graph nodes purge notice for doc '%s': %s", doc_id, g_err)
+
+    # 4. Purge from document registry, chunks, and outbox
     registry.delete_document(doc_id)
+
+    # 5. Purge physical file from disk
+    if doc.file_path and Path(doc.file_path).exists():
+        try:
+            Path(doc.file_path).unlink(missing_ok=True)
+            logger.info("Purged physical file '%s' for doc '%s'.", doc.file_path, doc_id)
+        except Exception as f_err:
+            logger.warning("Could not unlink physical file '%s': %s", doc.file_path, f_err)
+
     registry.log_audit_event("document_deleted", doc_id=doc_id, details={"filename": doc.filename})
 
     return {"status": "deleted", "doc_id": doc_id}

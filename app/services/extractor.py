@@ -64,6 +64,8 @@ class DocumentExtractor:
             return self.extract_txt(doc_id, path, filename)
         elif ext in ("xlsx", "xls"):
             return self.extract_xlsx(doc_id, path, filename)
+        elif ext == "csv":
+            return self.extract_csv(doc_id, path, filename)
         else:
             raise ExtractionError(f"Unsupported file format: '.{ext}'")
 
@@ -120,6 +122,11 @@ class DocumentExtractor:
 
             if plumber_doc:
                 plumber_doc.close()
+
+            if not sections:
+                raise ExtractionError(
+                    f"PDF '{filename}' contains no extractable text or tables (scanned or image-only documents are unsupported)."
+                )
 
             return ExtractionResult(
                 doc_id=doc_id,
@@ -261,3 +268,88 @@ class DocumentExtractor:
             )
         except Exception as exc:
             raise ExtractionError(f"Failed to extract spreadsheet '{filename}': {exc}") from exc
+
+    def extract_csv(self, doc_id: str, path: Path, filename: str) -> ExtractionResult:
+        """Extract CSV tabular data with line/row coordinates and structured table support."""
+        import csv
+        try:
+            try:
+                raw_text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                raw_text = path.read_text(encoding="latin-1")
+
+            lines = raw_text.splitlines()
+            if not lines:
+                raise ExtractionError(f"CSV file '{filename}' is empty.")
+
+            reader = csv.reader(lines)
+            rows = [row for row in reader if any(c.strip() for c in row)]
+            if not rows:
+                raise ExtractionError(f"CSV file '{filename}' contains no non-empty rows.")
+
+            headers = [c.strip() or f"col_{idx+1}" for idx, c in enumerate(rows[0])]
+            data_rows: list[tuple[int, list[Any]]] = []
+            for r_idx, r in enumerate(rows[1:], start=2):
+                data_rows.append((r_idx, [c.strip() for c in r]))
+
+            structured_sheets = {
+                "default": {
+                    "columns": headers,
+                    "rows": data_rows,
+                }
+            }
+
+            sections: list[ExtractedSection] = []
+            batch_size = 10
+            for b_idx in range(0, max(1, len(data_rows)), batch_size):
+                batch = data_rows[b_idx : b_idx + batch_size]
+                if not batch:
+                    break
+                first_row = batch[0][0]
+                last_row = batch[-1][0]
+                row_texts = []
+                for r_num, r_vals in batch:
+                    cells = []
+                    for c_idx, val in enumerate(r_vals):
+                        if val:
+                            c_name = headers[c_idx] if c_idx < len(headers) else f"col_{c_idx+1}"
+                            cells.append(f"{c_name}: {val}")
+                    if cells:
+                        row_texts.append(f"[Row {r_num}] " + ", ".join(cells))
+
+                if row_texts:
+                    sections.append(
+                        ExtractedSection(
+                            page_number=1,
+                            sheet_name="default",
+                            row_start=first_row,
+                            row_end=last_row,
+                            text=f"Sheet: default\n" + "\n".join(row_texts),
+                            metadata={"sheet": "default", "row_start": first_row, "row_end": last_row},
+                        )
+                    )
+
+            if not sections and headers:
+                sections.append(
+                    ExtractedSection(
+                        page_number=1,
+                        sheet_name="default",
+                        row_start=1,
+                        row_end=1,
+                        text=f"Sheet: default | Columns: {', '.join(headers)}",
+                        metadata={"sheet": "default", "row_start": 1, "row_end": 1},
+                    )
+                )
+
+            return ExtractionResult(
+                doc_id=doc_id,
+                filename=filename,
+                file_type="csv",
+                page_count=1,
+                sections=sections,
+                structured_sheets=structured_sheets,
+            )
+        except ExtractionError:
+            raise
+        except Exception as exc:
+            raise ExtractionError(f"Failed to extract CSV '{filename}': {exc}") from exc

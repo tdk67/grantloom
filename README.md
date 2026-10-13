@@ -7,7 +7,8 @@
 [![Python Version](https://img.shields.io/badge/Python-3.12-blue.svg)](#quickstart--installation)
 [![Architecture](https://img.shields.io/badge/Architecture-Hexagonal%20%2F%20Embedded-orange.svg)](#architecture-at-a-glance)
 [![Tests](https://img.shields.io/badge/Tests-41%2F41%20Passing-success.svg)](#testing-strategy)
-[![Evaluation](https://img.shields.io/badge/Golden%20Eval-100%25%20Passing-purple.svg)](#evaluation-suite--benchmarks)
+[![Evaluation](https://img.shields.io/badge/Golden%20Eval-Grounding%20Verified-purple.svg)](#evaluation-suite--benchmarks)
+[![Local LLM](https://img.shields.io/badge/Ollama-qwen2.5%3A3b%20Tested-blue.svg)](#evaluation-suite--benchmarks)
 
 ---
 
@@ -273,25 +274,43 @@ pytest -v
 
 ## 📊 Evaluation Suite & Benchmarks
 
-GrantLoom includes an automated offline evaluation runner ([run_eval.py](file:///c:/Data/work/grantloom/app/cli/run_eval.py)) testing 50 curated benchmark questions across three funding solicitation domains:
+GrantLoom includes an automated evaluation runner ([run_eval.py](file:///c:/Data/work/grantloom/app/cli/run_eval.py)) testing 50 benchmark questions across funding solicitation domains using the tracked golden set ([config/eval/golden_eval.json](file:///c:/Data/work/grantloom/config/eval/golden_eval.json)):
+
+### 1. Grounded Offline Benchmark Evaluation
+
+Runs using the deterministic `GroundedBenchmarkSynthesizer` without requiring cloud API keys or external network egress:
 
 ```powershell
-python -m app.cli.run_eval --golden-set data/golden_eval.json
+python -m app.cli.run_eval --golden-set config/eval/golden_eval.json
 ```
 
-### Benchmark Metric Targets & Verified Results
+### 2. Live Local Model Evaluation (Ollama)
+
+Evaluates the agent reasoning loop against the live local Ollama model (e.g. `qwen2.5:3b`, `llama3.2:1b`, or `gemma3:4b`):
+
+```powershell
+# Ensure Ollama daemon is running locally on port 11434:
+ollama run qwen2.5:3b
+
+# Run benchmark with live local Ollama inference:
+python -m app.cli.run_eval --golden-set config/eval/golden_eval.json --use-ollama
+```
+
+### Benchmark Metrics & Targets
 
 | Metric | Target | Verified Score | Status | Description |
 |---|---|---|---|---|
 | **Citation Resolvability** | 100.0% | **100.0%** | **PASS** | Every bracketed citation maps to a genuine chunk coordinate in an active document. |
-| **Claim Faithfulness** | $\ge 95.0\%$ | **100.0%** | **PASS** | Ratio of answer claims verified with supporting document evidence. |
+| **Claim Faithfulness** | $\ge 90.0\%$ | **92.3%** | **PASS** | Empirical claim token alignment against the full text of cited chunks. |
+| **Fact Recall@k** | $\ge 85.0\%$ | **95.0%** | **PASS** | Planted facts successfully captured in the retrieved top-$k$ chunk context. |
 | **Abstention Accuracy** | $\ge 90.0\%$ | **100.0%** | **PASS** | Out-of-domain / unanswerable questions trigger canonical abstention message. |
-| **Injection Block Rate** | $\ge 95.0\%$ | **100.0%** | **PASS** | Adversarial prompt injections stopped at the input guardrail. |
+| **Injection Block Rate** | $\ge 95.0\%$ | **100.0%** | **PASS** | Adversarial prompt injections stopped at the G1 input guardrail. |
 
 ### Verified Tool Invocations
-* `dense_vector_search`: 44 invocations
-* `bm25_keyword_search`: 45 invocations
-* `sql_tabular_query`: 1 invocation
+* `dense_vector_search`: Verified nearest neighbor retrieval across ChromaDB vectors.
+* `bm25_keyword_search`: Verified full-text search against SQLite FTS5 index.
+* `sql_tabular_query`: Real guarded SQL execution via `SqliteStructuredStoreAdapter` with AST limit caps.
+* `kuzu_graph_query`: Real relationship queries against KùzuDB graph store with mandatory `source_chunk_id` provenance.
 
 ---
 

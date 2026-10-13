@@ -5,15 +5,17 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Optional
 
-from fastapi import Depends
+from fastapi import Depends, Header
 
 from app.adapters.chroma_adapter import ChromaVectorStoreAdapter
 from app.adapters.embedder_adapter import DeterministicEmbedder, OpenRouterEmbedder
 from app.adapters.kuzu_adapter import KuzuGraphStoreAdapter
+from app.adapters.ollama_client import OllamaClientAdapter
 from app.adapters.openrouter_client import OpenRouterClientAdapter
 from app.adapters.sqlite_registry import SqliteRegistryAdapter
 from app.adapters.sqlite_structured_store import SqliteStructuredStoreAdapter
 from app.core.config import Settings, get_settings
+from app.core.errors import AuthenticationError
 from app.ports.embedder import EmbedderPort
 from app.ports.graph_store import GraphStorePort
 from app.ports.llm_client import LLMClientPort
@@ -117,8 +119,25 @@ def get_ingest_worker(settings: Settings = Depends(get_settings)) -> IngestWorke
 def get_llm_client(settings: Settings = Depends(get_settings)) -> LLMClientPort:
     global _llm_client_instance
     if _llm_client_instance is None:
-        _llm_client_instance = OpenRouterClientAdapter()
+        if settings.llm.private_mode or not settings.secrets.openrouter_api_key:
+            _llm_client_instance = OllamaClientAdapter(
+                base_url=settings.llm.ollama_base_url,
+                default_model=settings.llm.ollama_writer_model,
+            )
+        else:
+            _llm_client_instance = OpenRouterClientAdapter()
     return _llm_client_instance
+
+
+def verify_master_api_key(
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    settings: Settings = Depends(get_settings),
+) -> None:
+    """Enforce master API key on mutating administrative and ingestion endpoints if configured."""
+    expected_key = settings.secrets.master_api_key
+    if expected_key:
+        if not x_api_key or x_api_key.strip() != expected_key.strip():
+            raise AuthenticationError("Invalid or missing master API key in X-API-Key header.")
 
 
 def get_retrieval_service(settings: Settings = Depends(get_settings)) -> HybridRetrievalService:

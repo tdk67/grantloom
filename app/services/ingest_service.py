@@ -16,7 +16,7 @@ from app.ports.registry import RegistryPort
 
 logger = logging.getLogger("grantloom.services.ingest")
 
-ALLOWED_EXTENSIONS = {"pdf", "txt", "xlsx", "xls"}
+ALLOWED_EXTENSIONS = {"pdf", "txt", "xlsx", "xls", "csv"}
 
 
 @dataclass
@@ -61,7 +61,8 @@ class IngestionService:
         content_length: Optional[int] = None,
     ) -> IngestionUploadResult:
         """Stream uploaded file, compute SHA-256, enforce capacity limits, and deduplicate."""
-        # Validate filename and extension
+        # Validate and sanitize filename and extension
+        filename = Path(filename).name
         if not filename or "." not in filename:
             raise ValidationError(f"Invalid filename: '{filename}'. File must have an extension.")
 

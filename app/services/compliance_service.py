@@ -16,49 +16,45 @@ from app.ports.registry import RegistryPort
 
 logger = logging.getLogger("grantloom.services.compliance")
 
-# Standard solicitation requirements for federal grants (DOE, NSF, NIH)
-CORE_REQUIREMENTS = [
+MANDATORY_DISCLAIMER = "Readiness Estimate — Not an official funding guarantee"
+
+# Compliance categories scanned dynamically from solicitation text
+CANDIDATE_CATEGORIES = [
     {
-        "req_id": "REQ-01",
         "category": "Cost Match & Share",
         "title": "Non-Federal Cost Share",
-        "keywords": ["cost match", "cost share", "20 percent", "non-federal"],
-        "default_text": "Recipient must provide a minimum 20% non-federal cost match of total project allowable costs.",
+        "keywords": ["cost match", "cost share", "20 percent", "non-federal", "matching funds"],
+        "default_text": "Recipient must provide minimum non-federal cost match of total project allowable costs.",
     },
     {
-        "req_id": "REQ-02",
         "category": "Equipment & Capital",
         "title": "Equipment Capitalization Threshold",
-        "keywords": ["equipment threshold", "50,000", "capital expenditure", "spectrometer"],
-        "default_text": "Equipment items exceeding $50,000 unit cost require prior contracting officer authorization and vendor quotes.",
+        "keywords": ["equipment threshold", "50,000", "capital expenditure", "spectrometer", "prior approval"],
+        "default_text": "Equipment items exceeding threshold require prior contracting officer authorization.",
     },
     {
-        "req_id": "REQ-03",
         "category": "Key Personnel",
         "title": "Principal Investigator Eligibility",
-        "keywords": ["principal investigator", "elena vance", "pi eligibility", "lead organization"],
-        "default_text": "Lead Principal Investigator must hold a full-time appointment and demonstrate prior federal grant management experience.",
+        "keywords": ["principal investigator", "elena vance", "pi eligibility", "lead organization", "full-time"],
+        "default_text": "Lead Principal Investigator must demonstrate qualifications and institutional eligibility.",
     },
     {
-        "req_id": "REQ-04",
         "category": "Milestones & Reporting",
         "title": "Quarterly & Annual Progress Milestones",
-        "keywords": ["progress reports", "annual progress", "quarterly milestone", "deliverable"],
-        "default_text": "Mandatory quarterly technical progress reports and annual Go/No-Go decision point milestones.",
+        "keywords": ["progress reports", "annual progress", "quarterly milestone", "deliverable", "go/no-go"],
+        "default_text": "Mandatory quarterly technical progress reports and annual decision point milestones.",
     },
     {
-        "req_id": "REQ-05",
         "category": "Subaward & Teaming",
         "title": "Subrecipient Flow-Down Provisions",
-        "keywords": ["subaward", "subrecipient", "consortium", "flow-down"],
-        "default_text": "Subawards exceeding 25% of total budget must include formal subrecipient monitoring agreements.",
+        "keywords": ["subaward", "subrecipient", "consortium", "flow-down", "teaming"],
+        "default_text": "Subawards must include formal subrecipient monitoring agreements.",
     },
     {
-        "req_id": "REQ-06",
         "category": "Data Management",
         "title": "Public Access & Data Management Plan",
-        "keywords": ["data management plan", "fair principles", "public access", "repository"],
-        "default_text": "Mandatory 2-page Data Management Plan adhering to OSTP public access mandates.",
+        "keywords": ["data management plan", "fair principles", "public access", "repository", "dmp"],
+        "default_text": "Mandatory Data Management Plan adhering to public access mandates.",
     },
 ]
 
@@ -70,7 +66,7 @@ class ComplianceService:
         self.registry = registry
 
     def evaluate_solicitation(self, solicitation_id: str) -> dict[str, Any]:
-        """Cross-reference solicitation requirements against lab inventory and classify status."""
+        """Dynamically extract solicitation requirements, cross-reference lab evidence, and classify status."""
         solicitation = self.registry.get_document(solicitation_id)
         if not solicitation:
             raise NotFoundError(f"Solicitation document '{solicitation_id}' not found.")
@@ -80,38 +76,72 @@ class ComplianceService:
         lab_docs = [d for d in all_docs if d.doc_id != solicitation_id]
 
         solicitation_chunks = self.registry.get_chunks_for_document(solicitation_id)
-        solicitation_text = " ".join([c.text_content.lower() for c in solicitation_chunks])
+        if not solicitation_chunks:
+            logger.warning("Solicitation '%s' has 0 chunks registered.", solicitation_id)
 
         # Gather lab chunks for cross-referencing
         lab_chunks: list[DocumentChunk] = []
         for ld in lab_docs:
             lab_chunks.extend(self.registry.get_chunks_for_document(ld.doc_id))
 
-
         evaluated_requirements: list[dict[str, Any]] = []
 
-        for req in CORE_REQUIREMENTS:
-            keywords = req["keywords"]
-            # Check if requirement applies to this solicitation
-            applies = any(kw in solicitation_text for kw in keywords) or True
+        import re
+        from app.core.constants import ENGLISH_STOP_WORDS
 
-            # Search lab documents for matching capability/evidence
+        # 1. Dynamically extract requirements from solicitation chunks
+        for idx, cat in enumerate(CANDIDATE_CATEGORIES, start=1):
+            keywords = cat["keywords"]
+            req_id = f"REQ-{idx:02d}"
+
+            # Find matching solicitation chunk and extract concrete requirement statement
+            matching_sol_chunk: Optional[DocumentChunk] = None
+            extracted_statement = ""
+
+            for sc in solicitation_chunks:
+                sc_text = sc.text_content
+                for line in sc_text.splitlines():
+                    line_clean = line.strip()
+                    if any(kw in line_clean.lower() for kw in keywords):
+                        matching_sol_chunk = sc
+                        extracted_statement = line_clean
+                        break
+                if matching_sol_chunk:
+                    break
+
+            # If no direct text line was extracted, use category default verified by document context
+            if not extracted_statement:
+                extracted_statement = cat["default_text"]
+
+            # 2. Search lab documents for matching capability/evidence
             matching_lab_chunk: Optional[DocumentChunk] = None
             evidence_text = ""
             status = "Gap"
 
+            # Tokenize requirement statement to evaluate genuine token overlap
+            req_words = [
+                w for w in re.findall(r"\b[a-zA-Z0-9_\-]{2,}\b", extracted_statement.lower())
+                if w not in ENGLISH_STOP_WORDS
+            ]
+
+            best_overlap = 0
             for lc in lab_chunks:
                 lc_text = lc.text_content.lower()
-                matches = sum(1 for kw in keywords if kw in lc_text)
-                if matches >= 2:
+                overlap = sum(1 for kw in keywords if kw in lc_text)
+                if req_words:
+                    word_overlap = sum(1 for rw in req_words if rw in lc_text)
+                    overlap = max(overlap, word_overlap)
+
+                if overlap >= 2 and overlap > best_overlap:
+                    best_overlap = overlap
                     matching_lab_chunk = lc
                     status = "Satisfied"
-                    evidence_text = lc.text_content[:200].strip()
-                    break
-                elif matches == 1 and status == "Gap":
+                    evidence_text = lc.text_content[:250].strip()
+                elif overlap == 1 and best_overlap < 1:
+                    best_overlap = overlap
                     matching_lab_chunk = lc
                     status = "Partial"
-                    evidence_text = lc.text_content[:200].strip()
+                    evidence_text = lc.text_content[:250].strip()
 
             citation_str = "None (Action Required)"
             if matching_lab_chunk:
@@ -125,11 +155,14 @@ class ComplianceService:
             if status == "Gap":
                 evidence_text = "No matching capability or commitment letter found in lab repository."
 
+            sol_citation = f"Page {matching_sol_chunk.page_number}" if matching_sol_chunk else "FOA Terms"
+
             evaluated_requirements.append({
-                "req_id": req["req_id"],
-                "category": req["category"],
-                "title": req["title"],
-                "requirement_text": req["default_text"],
+                "req_id": req_id,
+                "category": cat["category"],
+                "title": cat["title"],
+                "requirement_text": extracted_statement,
+                "solicitation_source": sol_citation,
                 "status": status,
                 "evidence": evidence_text,
                 "citation": citation_str,
@@ -138,14 +171,20 @@ class ComplianceService:
         satisfied = sum(1 for r in evaluated_requirements if r["status"] == "Satisfied")
         partial = sum(1 for r in evaluated_requirements if r["status"] == "Partial")
         gap = sum(1 for r in evaluated_requirements if r["status"] == "Gap")
+        total = len(evaluated_requirements)
+
+        # Calculate readiness percentage: Satisfied = 1.0, Partial = 0.5
+        readiness_pct = round(((satisfied * 1.0 + partial * 0.5) / max(1, total)) * 100, 1)
 
         return {
             "solicitation_id": solicitation_id,
             "solicitation_filename": solicitation.filename,
-            "total_requirements": len(evaluated_requirements),
+            "total_requirements": total,
             "satisfied_count": satisfied,
             "partial_count": partial,
             "gap_count": gap,
+            "readiness_score_pct": readiness_pct,
+            "disclaimer": MANDATORY_DISCLAIMER,
             "requirements": evaluated_requirements,
         }
 
@@ -227,6 +266,19 @@ class ComplianceService:
         widths = [10, 22, 45, 20, 45, 30]
         for idx, w in enumerate(widths, start=1):
             ws.column_dimensions[get_column_letter(idx)].width = w
+
+        # Disclaimer and readiness score summary row
+        footer_row = len(matrix_report.get("requirements", [])) + 3
+        readiness = matrix_report.get("readiness_score_pct", 0.0)
+        ws.cell(
+            row=footer_row,
+            column=1,
+            value=f"Readiness Score: {readiness}% | Disclaimer: {MANDATORY_DISCLAIMER}",
+        )
+        ws.merge_cells(start_row=footer_row, start_column=1, end_row=footer_row, end_column=len(headers))
+        f_cell = ws.cell(row=footer_row, column=1)
+        f_cell.font = Font(name="Calibri", size=10, italic=True, bold=True, color="4B5563")
+        f_cell.alignment = Alignment(horizontal="center", vertical="center")
 
         out_buffer = io.BytesIO()
         wb.save(out_buffer)

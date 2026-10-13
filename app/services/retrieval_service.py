@@ -136,5 +136,11 @@ class HybridRetrievalService:
             logger.info("Abstention triggered: no active chunks retained after filtering.")
             return [], 0.0, True
 
-        effective_score = max(max_dense_score, 0.5 if has_bm25 else 0.0)
+        keyword_score = 0.0
+        if has_substantive_bm25 and query_tokens:
+            keyword_score = min(1.0, round(best_overlap / max(1, len(query_tokens)), 2))
+        elif has_bm25:
+            keyword_score = min(1.0, round(float(len(retained_chunks)) / float(top_k_bm25), 2))
+
+        effective_score = max(max_dense_score, keyword_score)
         return retained_chunks, effective_score, False

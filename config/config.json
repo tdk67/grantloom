@@ -1,6 +1,6 @@
 {
   "server": {
-    "host": "0.0.0.0",
+    "host": "127.0.0.1",
     "port": 8000
   },
   "database": {
@@ -32,7 +32,9 @@
   },
   "llm": {
     "private_mode": false,
-    "ollama_base_url": "http://localhost:11434"
+    "ollama_base_url": "http://127.0.0.1:11434",
+    "ollama_writer_model": "qwen2.5:3b",
+    "ollama_judge_model": "qwen2.5:3b"
   },
   "logging": {
     "log_full_prompts": false

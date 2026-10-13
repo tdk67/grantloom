@@ -6,14 +6,14 @@ import io
 from fastapi import APIRouter, Depends, Response
 from fastapi.responses import JSONResponse
 
-from app.api.deps import get_registry
+from app.api.deps import get_registry, verify_master_api_key
 from app.ports.registry import RegistryPort
 from app.services.compliance_service import ComplianceService
 
 router = APIRouter(prefix="/api/v1/compliance", tags=["compliance"])
 
 
-@router.post("/{solicitation_id}")
+@router.post("/{solicitation_id}", dependencies=[Depends(verify_master_api_key)])
 async def evaluate_compliance(
     solicitation_id: str,
     registry: RegistryPort = Depends(get_registry),

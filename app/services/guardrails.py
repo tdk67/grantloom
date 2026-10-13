@@ -151,10 +151,12 @@ class OutputGuard:
 
         for chunk_id in set(matches):
             chunk = self.registry.get_chunk(chunk_id)
-            if chunk is not None:
+            doc = self.registry.get_document(chunk.doc_id) if chunk else None
+
+            # Only verify citations if chunk exists AND parent document is in active state
+            if chunk is not None and doc is not None and doc.state == "active":
                 resolved_ids.add(chunk_id)
-                doc = self.registry.get_document(chunk.doc_id)
-                filename = doc.filename if doc else "unknown"
+                filename = doc.filename or "unknown"
 
                 verified_citations.append(
                     CitationCoordinate(
@@ -171,7 +173,11 @@ class OutputGuard:
                 )
             else:
                 unresolved_ids.add(chunk_id)
-                logger.warning("Unresolved citation ID '%s' stripped from response.", chunk_id)
+                logger.warning(
+                    "Unresolved or non-active citation ID '%s' stripped from response (doc state: %s).",
+                    chunk_id,
+                    doc.state if doc else "missing",
+                )
                 # Strip unverified citation marker from text
                 cleaned_text = cleaned_text.replace(f"[{chunk_id}]", "")
 

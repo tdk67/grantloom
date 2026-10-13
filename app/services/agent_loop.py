@@ -112,34 +112,59 @@ class RetrieverAgent:
 
         # Discrete tool execution: dense_vector_search
         if "dense_vector_search" in plan.selected_tools:
+            k = self.retrieval_service.settings.retrieval.dense_top_k
             tool_logs.append(AgentToolExecution(
                 tool_name="dense_vector_search",
-                arguments={"query": query, "top_k": 10},
-                result_count=10,
+                arguments={"query": query, "top_k": k},
+                result_count=k,
             ))
 
         # Discrete tool execution: bm25_keyword_search
         if "bm25_keyword_search" in plan.selected_tools:
+            k = self.retrieval_service.settings.retrieval.bm25_top_k
             tool_logs.append(AgentToolExecution(
                 tool_name="bm25_keyword_search",
-                arguments={"query": query, "top_k": 10},
-                result_count=10,
+                arguments={"query": query, "top_k": k},
+                result_count=k,
             ))
 
         # Discrete tool execution: sql_tabular_query
         if "sql_tabular_query" in plan.selected_tools:
+            sql_rows_count = 0
+            if self.structured_store:
+                try:
+                    conn = self.structured_store._get_connection()
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'doc_%'")
+                    tables = [row[0] for row in cursor.fetchall()]
+                    conn.close()
+
+                    for tbl in tables[:3]:
+                        res = self.structured_store.execute_query(f'SELECT * FROM "{tbl}" LIMIT 10;')
+                        sql_rows_count += len(res)
+                except Exception as s_err:
+                    logger.debug("Structured query notice: %s", s_err)
+
             tool_logs.append(AgentToolExecution(
                 tool_name="sql_tabular_query",
                 arguments={"query": query, "ast_guard": True},
-                result_count=1,
+                result_count=sql_rows_count,
             ))
 
         # Discrete tool execution: graph_template_query
         if "graph_template_query" in plan.selected_tools:
+            graph_rows_count = 0
+            if self.graph_store:
+                try:
+                    g_res = self.graph_store.query_template("traverse_all", {})
+                    graph_rows_count = len(g_res)
+                except Exception as g_err:
+                    logger.debug("Graph traverse notice: %s", g_err)
+
             tool_logs.append(AgentToolExecution(
                 tool_name="graph_template_query",
-                arguments={"query": query, "templates": ["requirements_by_doc", "affiliations_by_person"]},
-                result_count=1,
+                arguments={"query": query, "template": "traverse_all"},
+                result_count=graph_rows_count,
             ))
 
         chunks, max_relevance, is_abstention = await self.retrieval_service.retrieve(
@@ -183,9 +208,13 @@ class WriterAgent:
             prompt += f"\n[CRITICAL FEEDBACK]: {feedback}\n"
         prompt += "\nAnswer with explicit [chunk_id] citations:"
 
+        model = self.settings.models.writer_model
+        if self.settings.llm.private_mode:
+            model = self.settings.llm.ollama_writer_model
+
         return await self.llm_client.generate_response(
             prompt=prompt,
-            model=self.settings.models.writer_model,
+            model=model,
             system_prompt="You are GrantLoom WriterAgent. Cite every claim with genuine [chunk_id] markers.",
             temperature=0.0,
             api_key=api_key,
@@ -214,8 +243,54 @@ class ValidatorAgent:
             return cleaned_text, [], 1.0, 1.0, 1.0
 
         resolvability = 1.0 if citations else 0.0
-        faithfulness = 0.96 if len(citations) > 0 else 0.40
 
+        if not citations:
+            return cleaned_text, [], conf, 0.0, 0.0
+
+        # Gather full text evidence from verified citations
+        import re
+        from app.core.constants import ENGLISH_STOP_WORDS
+
+        evidence_texts: list[str] = []
+        for c in citations:
+            chunk = self.output_guard.registry.get_chunk(c.chunk_id)
+            if chunk:
+                evidence_texts.append(chunk.text_content.lower())
+            else:
+                evidence_texts.append(c.excerpt.lower())
+        combined_evidence = " ".join(evidence_texts)
+        evidence_words = set(re.findall(r"\b[a-zA-Z0-9_\-]{2,}\b", combined_evidence))
+
+        FRAMING_WORDS = {
+            "according", "documented", "evidence", "document", "documents",
+            "source", "page", "sheet", "row", "based", "stated", "mentioned",
+            "shows", "indicates", "found", "verified", "proof", "requirement",
+            "note", "stated", "confirmed",
+        }
+        all_stop = set(ENGLISH_STOP_WORDS).union(FRAMING_WORDS)
+
+        # Strip citation markers before evaluating factual claim tokens
+        from app.services.guardrails import CITATION_PATTERN
+        text_without_citations = CITATION_PATTERN.sub("", draft)
+
+        sentences = [s.strip() for s in re.split(r"[.!?]\s+", text_without_citations) if s.strip()]
+        if not sentences:
+            sentences = [text_without_citations]
+
+        sentence_scores: list[float] = []
+        for s in sentences:
+            s_words = [w for w in re.findall(r"\b[a-zA-Z0-9_\-]{2,}\b", s.lower()) if w not in all_stop]
+            if not s_words:
+                continue
+            matched = sum(1 for w in s_words if w in evidence_words)
+            sentence_scores.append(matched / len(s_words))
+
+        if sentence_scores:
+            faithfulness = round(sum(sentence_scores) / len(sentence_scores), 2)
+        else:
+            faithfulness = 0.85
+
+        faithfulness = max(0.0, min(1.0, faithfulness))
         return cleaned_text, citations, conf, faithfulness, resolvability
 
 
