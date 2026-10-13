@@ -30,3 +30,8 @@ class VectorStorePort(ABC):
     def count(self) -> int:
         """Return total indexed vectors."""
         ...
+
+    @abstractmethod
+    def ping(self) -> None:
+        """Raise StorageError if the vector index is not reachable (readiness probe)."""
+        ...

@@ -18,12 +18,22 @@ logger = logging.getLogger("grantloom.adapters.chroma_adapter")
 COLLECTION_NAME = "grantloom_chunks"
 
 
-class ChromaVectorStoreAdapter(VectorStorePort):
-    """In-process ChromaDB vector store with default ONNX embedder explicitly disabled."""
+class EmbeddingSpaceMismatchError(StorageError):
+    """The persisted collection was built with a different embedder than the one configured."""
 
-    def __init__(self, chroma_path: str | Path) -> None:
+
+class ChromaVectorStoreAdapter(VectorStorePort):
+    """In-process ChromaDB vector store with default ONNX embedder explicitly disabled.
+
+    The collection records the fingerprint of the embedder that produced its vectors. Opening it
+    with a different embedder fails fast instead of silently mixing embedding spaces; run
+    `python -m app.cli.reindex` to rebuild the collection for the configured embedder.
+    """
+
+    def __init__(self, chroma_path: str | Path, embedding_fingerprint: str) -> None:
         path_obj = Path(chroma_path)
         path_obj.mkdir(parents=True, exist_ok=True)
+        self.embedding_fingerprint = embedding_fingerprint
         self.client = chromadb.PersistentClient(
             path=str(path_obj),
             settings=ChromaSettings(anonymized_telemetry=False, is_persistent=True),
@@ -32,7 +42,24 @@ class ChromaVectorStoreAdapter(VectorStorePort):
         self.collection = self.client.get_or_create_collection(
             name=COLLECTION_NAME,
             embedding_function=None,
-            metadata={"hnsw:space": "cosine"},
+            metadata={"hnsw:space": "cosine", "embedding_fingerprint": embedding_fingerprint},
+        )
+        stored = (self.collection.metadata or {}).get("embedding_fingerprint")
+        if stored is None and self.collection.count() == 0:
+            self.collection.modify(metadata={"embedding_fingerprint": embedding_fingerprint})
+        elif stored != embedding_fingerprint:
+            raise EmbeddingSpaceMismatchError(
+                f"Vector collection was built with embedder '{stored or 'unknown'}' but '{embedding_fingerprint}' "
+                "is configured. Run `python -m app.cli.reindex` to rebuild the vector index."
+            )
+
+    def reset(self) -> None:
+        """Drop and recreate the collection for the configured embedder (used by the reindex CLI)."""
+        self.client.delete_collection(COLLECTION_NAME)
+        self.collection = self.client.get_or_create_collection(
+            name=COLLECTION_NAME,
+            embedding_function=None,
+            metadata={"hnsw:space": "cosine", "embedding_fingerprint": self.embedding_fingerprint},
         )
 
     def add_chunks(self, chunks: Sequence[ChunkVector]) -> None:
@@ -120,3 +147,20 @@ class ChromaVectorStoreAdapter(VectorStorePort):
             return self.collection.count()
         except Exception as exc:
             raise StorageError(f"Failed to get ChromaDB collection count: {exc}") from exc
+
+    def ping(self) -> None:
+        self.count()
+
+    def close(self) -> None:
+        """Release the persistent client's file handles (Windows cannot delete the directory otherwise)."""
+        self.client.clear_system_cache()
+
+
+def drop_collection(chroma_path: str | Path) -> None:
+    """Delete the persisted collection (reindex CLI) without opening it through the fingerprint guard."""
+    client = chromadb.PersistentClient(
+        path=str(Path(chroma_path)),
+        settings=ChromaSettings(anonymized_telemetry=False, is_persistent=True),
+    )
+    if COLLECTION_NAME in [c.name if hasattr(c, "name") else c for c in client.list_collections()]:
+        client.delete_collection(COLLECTION_NAME)

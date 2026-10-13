@@ -6,35 +6,97 @@
   "database": {
     "sqlite_path": "data/grantloom.db",
     "chroma_path": "data/chromadb",
-    "kuzu_path": "data/kuzudb"
+    "kuzu_path": "data/kuzudb",
+    "uploads_path": "data/uploads",
+    "synthetic_path": "data/synthetic"
   },
   "limits": {
     "max_documents": 50,
     "max_file_size_mb": 25,
     "max_pages_per_doc": 100
   },
+  "rate_limits": {
+    "ask": "30/minute",
+    "upload": "20/minute",
+    "compliance": "10/minute",
+    "admin": "5/minute"
+  },
   "models": {
     "writer_model": "anthropic/claude-3.5-sonnet",
     "judge_model": "openai/gpt-4o-mini",
-    "embedding_model": "text-embedding-3-small"
+    "embedding_backend": "deterministic",
+    "embedding_model": "text-embedding-3-small",
+    "embedding_dimension": 1536
   },
   "retrieval": {
     "dense_top_k": 10,
     "bm25_top_k": 10,
     "rrf_k": 60,
     "min_relevance_threshold": 0.35,
-    "rerank_top_k": 5
+    "rerank_top_k": 5,
+    "top_k_after_filter": 5,
+    "max_structured_tables": 6,
+    "max_tool_evidence_chunks": 6
+  },
+  "chunking": {
+    "target_chunk_size": 800,
+    "chunk_overlap": 100,
+    "rows_per_chunk": 10
+  },
+  "ingestion": {
+    "worker_poll_interval_seconds": 0.5,
+    "embed_batch_size": 64,
+    "max_job_attempts": 3,
+    "stale_job_timeout_seconds": 600,
+    "maintenance_interval_seconds": 3600
   },
   "guardrails": {
     "max_rewrite_attempts": 2,
     "quarantine_retention_days": 14,
-    "taint_threshold_chunks": 2
+    "taint_threshold_chunks": 2,
+    "tier2_sample_rate": 0.02,
+    "max_query_chars": 2000
+  },
+  "decision": {
+    "backend": "llm_judge",
+    "fallback_backend": "heuristic",
+    "router_min_confidence": 0.6,
+    "domain_min_confidence": 0.6,
+    "injection_probability_threshold": 0.5,
+    "min_chunk_usefulness": 20,
+    "llm_judge": {
+      "max_chunk_chars": 1200,
+      "max_tier2_chunks_per_call": 8
+    },
+    "heuristic": {
+      "grounded_overlap": 0.7,
+      "satisfied_overlap": 0.5,
+      "partial_overlap": 0.25,
+      "corpus_in_domain_overlap": 0.5
+    }
+  },
+  "sql_guard": {
+    "max_rows": 100,
+    "timeout_seconds": 5.0
+  },
+  "compliance": {
+    "max_requirements": 40,
+    "evidence_top_k": 3,
+    "evidence_candidates": 50
+  },
+  "timeouts": {
+    "openrouter_seconds": 60.0,
+    "ollama_seconds": 180.0,
+    "probe_seconds": 5.0,
+    "embedding_seconds": 30.0
   },
   "llm": {
     "private_mode": false,
+    "openrouter_base_url": "https://openrouter.ai/api/v1",
     "ollama_base_url": "http://127.0.0.1:11434",
     "ollama_writer_model": "qwen2.5:3b",
-    "ollama_judge_model": "qwen2.5:3b"
+    "ollama_judge_model": "phi3:latest",
+    "byok_validation_ttl_seconds": 300
   },
   "logging": {
     "log_full_prompts": false

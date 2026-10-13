@@ -40,7 +40,7 @@ Phase 2: VPS Deployment & Demo Verification (Linux 8 GB VPS)
 | **M4** | Guardrails, Bounded Rewrite Loop & Compliance Matrix | **COMPLETED** | 100% pass (3 integration tests in `test_compliance_and_guards.py`); 2-tier injection scanner; bounded rewrite loop; openpyxl matrix export; `/api/v1/examples` endpoint |
 | **M5** | Synthetic Demo Data Generator (CLI & API) | **COMPLETED** | 100% pass (6 unit tests in `test_synthetic_generator.py` + `test_admin_synthetic.py`); standalone CLI + admin generation & indexing endpoint |
 | **M6** | Thin Frontend Implementation (Vanilla JS SPA) | **COMPLETED** | 100% pass (`test_frontend_static.py`); WCAG AA a11y, skip link, 5 views, IndexedDB key manager, live lockout, citation slide-over drawer, `/robots.txt`, `/sitemap.xml`, `/llms.txt` |
-| **M7** | Agent Loop Alignment & Synthetic Evaluation Suite | **COMPLETED** | 100% pass (`test_agent_eval.py` + CLI runner); Resolvability 100%, Faithfulness 100%, Abstention 100%, Injection Block 100%; discrete tool execution verified |
+| **M7** | Agent Loop Alignment & Synthetic Evaluation Suite | **REWORKED (review-02)** | Single pipeline for API + eval; golden set rebuilt against the corpus; held-out adversarial set; faithfulness only via an independent judge on a real writer. Earlier "100% faithfulness" figures came from an extractive stub and are withdrawn. Current numbers: README § Evaluation. |
 | **M8** | VPS Dockerization & Host Monitoring Hook | **TODO** | Phase 2 pending |
 | **M9** | Reverse Proxy, TLS & Master Key Protection | **TODO** | Phase 2 pending |
 | **M10** | End-to-End Demo Rehearsal & Capstone Deliverables | **TODO** | Phase 2 pending |

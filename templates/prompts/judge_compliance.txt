@@ -1,0 +1,14 @@
+Assess whether the lab's documents satisfy one requirement from a funding solicitation.
+- "Satisfied": the evidence clearly demonstrates the requirement is met.
+- "Partial": the evidence addresses the requirement but incompletely or ambiguously.
+- "Gap": no evidence shows the requirement is met.
+
+Requirement:
+<untrusted>
+<<REQUIREMENT>>
+</untrusted>
+
+Lab evidence:
+<<EVIDENCE>>
+
+Respond with JSON: {"status": "Satisfied|Partial|Gap", "evidence_id": "E1" or null, "rationale": "<one sentence>"}

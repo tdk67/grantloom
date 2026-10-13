@@ -1,367 +1,461 @@
-"""Golden Evaluation Runner CLI.
+"""Golden evaluation runner.
 
 Usage:
-  python -m app.cli.run_eval --golden-set data/golden_eval.json
+  python -m app.cli.run_eval                                   # offline pipeline smoke run
+  python -m app.cli.run_eval --writer openrouter --decision llm_judge   # real models (OPENROUTER_API_KEY in .env)
 
-Measures:
-  1. Citation Resolvability (Target: 100%)
-  2. Faithfulness (Target: >= 0.95)
-  3. Abstention Accuracy (Target: >= 0.90)
-  4. Injection Block Rate (Target: >= 0.95)
-  5. Tool execution logging (dense_vector_search, bm25_keyword_search, sql_tabular_query)
+What it does:
+- Builds an isolated workspace in a temp directory (never touches data/), generates the synthetic
+  corpus, ingests it through the real ingestion worker, and asks every golden question through the
+  same AskService pipeline the API uses.
+- Answer accuracy / recall@k use whole-value matching (normalized numbers, word boundaries, or an
+  explicit `expected_regex`), never substrings of a 250-char excerpt.
+- Faithfulness is scored by an independent judge whose model family differs from the writer (NFR-6),
+  and only when a real writer model runs. With the offline extractive stub, the answer is a copy of
+  the evidence, so faithfulness would be circular and is reported as "not measured".
+- Injection blocking is reported for the canonical golden adversarials and, separately, for the
+  held-out paraphrased set (config/eval/adversarial_heldout.json).
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import gc
 import json
 import logging
-import sys
+import re
+import shutil
+import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator, Optional
 
 from app.adapters.chroma_adapter import ChromaVectorStoreAdapter
-from app.adapters.embedder_adapter import DeterministicEmbedder
+from app.adapters.decision_backends import FallbackDecisionBackend, HeuristicDecisionBackend, LLMJudgeDecisionBackend
 from app.adapters.kuzu_adapter import KuzuGraphStoreAdapter
 from app.adapters.ollama_client import OllamaClientAdapter
+from app.adapters.openrouter_client import OpenRouterClientAdapter
 from app.adapters.sqlite_registry import SqliteRegistryAdapter
 from app.adapters.sqlite_structured_store import SqliteStructuredStoreAdapter
-from app.core.config import get_settings
+from app.core.config import PROJECT_ROOT, Settings, get_settings
+from app.core.text import content_tokens, contains_value, overlap_ratio, split_sentences
 from app.db import migrator
+from app.ports.decision_backend import DecisionBackendPort
 from app.ports.llm_client import LLMClientPort
-from app.services.agent_loop import (
-    AgentLoopOrchestrator,
-    PlannerAgent,
-    RetrieverAgent,
-    ValidatorAgent,
-    WriterAgent,
-)
-from app.services.guardrails import InputGuard, OutputGuard, StrategyRouter
-from app.services.retrieval_service import ABSTENTION_MESSAGE, HybridRetrievalService
-from app.synthetic.generator import SyntheticDataGenerator
-from app.workers.ingest_worker import IngestWorker
+from app.services.agent_loop import AgentRunResult
+from app.services.ask_service import AskService
+from app.services.chunker import DocumentChunker
+from app.services.extractor import DocumentExtractor
+from app.services.guardrails import IngestionScanner, OutputGuard
+from app.services.inference import build_embedder, evaluator_independence_problems
 from app.services.ingest_service import IngestionService
+from app.services.key_vault import EphemeralKeyVault
+from app.services.retrieval_service import ABSTENTION_MESSAGE, HybridRetrievalService, corpus_overlap
+from app.synthetic.generator import SyntheticDataGenerator
+from app.verification.sql_guard import SqlGuard
+from app.workers.ingest_worker import IngestWorker
 
-logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger("grantloom.cli.run_eval")
 
+DEFAULT_GOLDEN = PROJECT_ROOT / "config" / "eval" / "golden_eval.json"
+DEFAULT_HELDOUT = PROJECT_ROOT / "config" / "eval" / "adversarial_heldout.json"
 
-class GroundedBenchmarkSynthesizer(LLMClientPort):
-    """Grounded offline synthesizer extracting factual propositions from context chunks."""
+# PRD §4.2 targets
+TARGETS = {
+    "citation_resolvability": 1.0,
+    "faithfulness": 0.95,
+    "abstention_accuracy": 0.90,
+    "injection_block_rate_canonical": 0.95,
+    "injection_block_rate_heldout": 0.95,
+    "recall_at_k": 0.85,
+}
 
-    def __init__(self, registry: SqliteRegistryAdapter) -> None:
-        self.registry = registry
+CONTEXT_BLOCK_RE = re.compile(r"\[([A-Za-z0-9_\-:]+)\]\nSource: [^\n]*\nText: (.*?)(?=\n\n\[|\n\nTool Results|\n\nQuestion:)", re.S)
+
+
+class ExtractiveStubWriter(LLMClientPort):
+    """Offline stand-in writer: copies the context line that best overlaps the question.
+
+    It exists to exercise the pipeline without a model. Its answers are the evidence verbatim, so any
+    faithfulness score computed on them is meaningless; the runner does not report one.
+    """
+
+    MIN_OVERLAP = 0.4
+
+    @property
+    def provider(self) -> str:
+        return "extractive-stub"
+
+    @property
+    def destination(self) -> str:
+        return "local (no model)"
 
     async def validate_api_key(self, api_key: str) -> bool:
         return True
 
-    async def generate_response(
-        self,
-        prompt: str,
-        model: str,
-        system_prompt: str | None = None,
-        temperature: float = 0.0,
-        api_key: str | None = None,
-    ) -> str:
-        import re
-        from app.core.constants import ENGLISH_STOP_WORDS
+    async def describe_model(self, model: str, api_key: Optional[str] = None) -> dict[str, Any]:
+        return {"found": True, "tool_calling": False, "context_length": None}
 
-        # Extract question keywords
-        q_match = re.search(r"Question:\s*([^\n]+)", prompt)
-        q_text = q_match.group(1).lower() if q_match else ""
-        q_words = set(re.findall(r"\b[a-zA-Z0-9_\-]{2,}\b", q_text)) - set(ENGLISH_STOP_WORDS)
+    async def generate_response(self, prompt: str, model: str, system_prompt: Optional[str] = None,
+                                temperature: float = 0.0, api_key: Optional[str] = None, json_output: bool = False) -> str:
+        if json_output:
+            return '{"sql": null, "table": null}'
+        question = prompt.rsplit("Question:", 1)[-1].split("\n", 1)[0]
+        best: tuple[float, str, str] = (0.0, "", "")
+        for chunk_id, text in CONTEXT_BLOCK_RE.findall(prompt):
+            for line in split_sentences(" ".join(text.split())):
+                score = overlap_ratio(question, line)
+                if score > best[0]:
+                    best = (score, chunk_id, line)
+        if best[0] < self.MIN_OVERLAP or not content_tokens(question):
+            return ABSTENTION_MESSAGE
+        return f"{best[2][:220]} [{best[1]}]"
 
-        chunk_blocks = re.findall(r"\[([a-zA-Z0-9_\-:]+)\](?:\s*\([^)]*\))?:\s*([^\n]+(?:\n[^\n]+)*?)(?=\n\n\[|\n\nQuestion|\Z)", prompt)
-        if not chunk_blocks:
-            matches = re.findall(r"\[([a-zA-Z0-9_\-:]+)\]", prompt)
-            if matches:
-                cid = matches[0]
-                return f"Evidence satisfies the specified condition [{cid}]."
-            return "This information was not found in the indexed documents."
-
-        # Find best chunk matching question keywords
-        best_cid = chunk_blocks[0][0]
-        best_snippet = ""
-        best_overlap = -1
-
-        for cid, c_text in chunk_blocks:
-            c_words = set(re.findall(r"\b[a-zA-Z0-9_\-]{2,}\b", c_text.lower()))
-            overlap = len(q_words.intersection(c_words))
-            if overlap > best_overlap:
-                best_overlap = overlap
-                best_cid = cid
-                # Pick the most relevant line in that chunk
-                lines = [l.strip() for l in c_text.splitlines() if l.strip()]
-                best_line = lines[0] if lines else c_text.strip()
-                for l in lines:
-                    l_words = set(re.findall(r"\b[a-zA-Z0-9_\-]{2,}\b", l.lower()))
-                    if len(q_words.intersection(l_words)) >= len(q_words.intersection(set(re.findall(r"\b[a-zA-Z0-9_\-]{2,}\b", best_line.lower())))):
-                        best_line = l
-                best_snippet = best_line[:140].strip()
-
-        if best_cid and best_snippet:
-            return f"{best_snippet} [{best_cid}]"
-        elif best_cid:
-            return f"Evidence confirms the stated requirement [{best_cid}]."
-        return "This information was not found in the indexed documents."
-
-    async def stream_response(self, *args, **kwargs):
-        resp = await self.generate_response(*args, **kwargs)
-        yield resp
+    async def stream_response(self, prompt: str, model: str, system_prompt: Optional[str] = None,
+                              temperature: float = 0.0, api_key: Optional[str] = None) -> AsyncIterator[str]:
+        yield await self.generate_response(prompt, model, system_prompt, temperature, api_key)
 
 
-async def run_evaluation(golden_set_path: Path, use_ollama: bool = False, model_name: Optional[str] = None) -> dict[str, Any]:
-    print(f"\n=======================================================")
-    print(f"  GrantLoom Golden Evaluation Suite (Capstone Task 8)  ")
-    print(f"=======================================================")
-    print(f"Dataset: {golden_set_path.resolve()}\n")
+@dataclass
+class EvalRun:
+    settings: Settings
+    workspace: Path
+    ask_service: AskService
+    registry: SqliteRegistryAdapter
+    writer_label: str
+    decision_label: str
+    evaluator: Optional[DecisionBackendPort]
+    evaluator_label: str
+    caveats: list[str] = field(default_factory=list)
+    _graph: Optional[KuzuGraphStoreAdapter] = None
+    _vectors: Optional[ChromaVectorStoreAdapter] = None
+    api_key: Optional[str] = None
 
-    if not golden_set_path.exists():
-        fallback_path = Path("config/eval/golden_eval.json")
-        if fallback_path.exists():
-            golden_set_path = fallback_path
-        else:
-            fallback_data = Path("data/golden_eval.json")
-            if fallback_data.exists():
-                golden_set_path = fallback_data
-            else:
-                print(f"Error: Golden set not found at {golden_set_path}")
-                sys.exit(1)
+    def close(self) -> None:
+        if self._graph is not None:
+            self._graph.close()
+        if self._vectors is not None:
+            self._vectors.close()
+        self.registry.engine.dispose()
+        gc.collect()
 
-    golden_data = json.loads(golden_set_path.read_text(encoding="utf-8"))
-    total_questions = len(golden_data)
-    print(f"Loaded {total_questions} benchmark evaluation questions.\n")
 
-    settings = get_settings()
+def _workspace_settings(base: Settings, workspace: Path) -> Settings:
+    database = base.database.model_copy(update={
+        "sqlite_path": str(workspace / "grantloom.db"),
+        "chroma_path": str(workspace / "chromadb"),
+        "kuzu_path": str(workspace / "kuzudb"),
+        "uploads_path": str(workspace / "uploads"),
+        "synthetic_path": str(workspace / "synthetic"),
+    })
+    # The eval builds its own embedder; a cloud embedding backend would need a server key.
+    models = base.models.model_copy(update={"embedding_backend": "deterministic"})
+    return base.model_copy(update={"database": database, "models": models})
 
-    # Initialize storage & migrations
-    db_path = "data/grantloom.db"
-    migrator.upgrade("head", db_url=f"sqlite:///{db_path}")
 
-    registry = SqliteRegistryAdapter(db_path)
-    vector_store = ChromaVectorStoreAdapter("data/chromadb")
-    embedder = DeterministicEmbedder()
-    structured_store = SqliteStructuredStoreAdapter(db_path)
-    graph_store = KuzuGraphStoreAdapter("data/kuzudb")
+async def build_eval_run(
+    workspace: Path,
+    writer: str = "offline",
+    writer_model: Optional[str] = None,
+    decision: str = "heuristic",
+    judge_model: Optional[str] = None,
+) -> EvalRun:
+    workspace.mkdir(parents=True, exist_ok=True)
+    base = get_settings()
+    settings = _workspace_settings(base, workspace)
+    caveats = ["Embeddings: deterministic lexical hashing (not semantic); dense recall reflects token overlap."]
+
+    # Model provider for writer / judge: OpenRouter (the real deployment path, key from .env) or local Ollama.
+    provider = "ollama" if writer == "ollama" else "openrouter"
+    api_key: Optional[str] = None
+    if provider == "ollama":
+        client: Optional[LLMClientPort] = OllamaClientAdapter(
+            base_url=settings.llm.ollama_base_url,
+            timeout_seconds=settings.timeouts.ollama_seconds,
+            probe_timeout_seconds=settings.timeouts.probe_seconds,
+            log_full_prompts=settings.logging.log_full_prompts,
+        )
+        writer_model = writer_model or settings.llm.ollama_writer_model
+        judge_model = judge_model or settings.llm.ollama_judge_model
+    elif writer == "openrouter" or decision == "llm_judge":
+        api_key = settings.secrets.openrouter_api_key
+        if not api_key:
+            raise SystemExit("OpenRouter evaluation needs OPENROUTER_API_KEY in .env.")
+        client = OpenRouterClientAdapter(
+            base_url=settings.llm.openrouter_base_url,
+            timeout_seconds=settings.timeouts.openrouter_seconds,
+            log_full_prompts=settings.logging.log_full_prompts,
+        )
+        await client.validate_api_key(api_key)
+        writer_model = writer_model or settings.models.writer_model
+        judge_model = judge_model or settings.models.judge_model
+    else:
+        client = None
+
+    if writer in ("openrouter", "ollama"):
+        problems = evaluator_independence_problems(writer_model, judge_model)
+        if problems:
+            raise SystemExit(f"NFR-6 violation, refusing to evaluate: {problems[0]}")
+        llm: LLMClientPort = client
+        writer_label = f"{provider}:{writer_model}"
+    else:
+        llm = ExtractiveStubWriter()
+        writer_model = "extractive-stub"
+        writer_label = "offline extractive stub (no model)"
+        caveats.append("Writer: extractive stub. Faithfulness is not measured (it would be circular); answer accuracy measures retrieval + line selection only.")
+
+    migrator.upgrade("head", db_url=f"sqlite:///{Path(settings.database.sqlite_path).as_posix()}")
+    registry = SqliteRegistryAdapter(settings.database.sqlite_path)
+    heuristic = HeuristicDecisionBackend(settings.decision.heuristic, lambda q: corpus_overlap(registry, q))
+    if decision == "llm_judge":
+        decision_backend: DecisionBackendPort = FallbackDecisionBackend(
+            LLMJudgeDecisionBackend(client, judge_model, settings.decision), heuristic
+        )
+        decision_label = f"llm_judge {provider}:{judge_model} (fallback: heuristic)"
+    else:
+        decision_backend = heuristic
+        decision_label = "heuristic"
+        caveats.append("Decision backend: heuristic. G1 cannot catch paraphrased injections; G4 uses lexical overlap.")
+
+    evaluator: Optional[DecisionBackendPort] = None
+    evaluator_label = "not run"
+    if writer in ("openrouter", "ollama"):
+        evaluator = LLMJudgeDecisionBackend(client, judge_model, settings.decision)
+        evaluator_label = f"independent judge {provider}:{judge_model}"
+
+    key_vault = EphemeralKeyVault()
+    embedder = build_embedder(settings)
+    vector_store = ChromaVectorStoreAdapter(settings.database.chroma_path, embedder.fingerprint)
+    structured_store = SqliteStructuredStoreAdapter(
+        settings.database.sqlite_path, SqlGuard(settings.sql_guard.max_rows, settings.sql_guard.timeout_seconds)
+    )
+    graph_store = KuzuGraphStoreAdapter(settings.database.kuzu_path)
 
     worker = IngestWorker(
         registry=registry,
         vector_store=vector_store,
         embedder=embedder,
+        scanner=IngestionScanner(decision_backend, settings.guardrails),
+        extractor=DocumentExtractor(settings.limits.max_pages_per_doc, settings.chunking.rows_per_chunk),
+        chunker=DocumentChunker(settings.chunking.target_chunk_size, settings.chunking.chunk_overlap),
+        ingestion=settings.ingestion,
+        quarantine_retention_days=settings.guardrails.quarantine_retention_days,
         structured_store=structured_store,
         graph_store=graph_store,
+        key_vault=key_vault,
     )
-    ingest_service = IngestionService(registry=registry)
+    ingest = IngestionService(registry=registry, settings=settings)
+    generated = SyntheticDataGenerator(output_dir=Path(settings.database.synthetic_path)).generate_all(quiet=True)
+    # Solicitation first so its funders are known when the proposal is indexed
+    for info in sorted(generated["files"], key=lambda f: not f["filename"].startswith("DOE")):
+        uploaded = ingest.upload_document(info["filename"], Path(info["path"]).read_bytes())
+        key_vault.put(uploaded.doc_id, api_key)  # Tier-2 scan uses the same key, held in memory only
+        while await worker.process_next_job():
+            pass
+    not_active = [d.filename for d in registry.list_documents() if d.state != "active"]
+    if not_active:
+        raise RuntimeError(f"Corpus ingestion failed for: {not_active}")
 
-    # Ensure synthetic dataset is generated and indexed
-    synth_dir = Path("data/synthetic")
-    generator = SyntheticDataGenerator(output_dir=synth_dir)
-    if not (synth_dir / "DOE_Solar_2026_Sample.pdf").exists():
-        print("Generating synthetic demo documents for benchmark...")
-        generator.generate_all(quiet=True)
-
-    import hashlib
-    from app.ports.vector_store import ChunkVector
-
-    for synth_file in synth_dir.glob("*_Sample.*"):
-        content = synth_file.read_bytes()
-        h = hashlib.sha256(content).hexdigest()
-        existing = registry.get_document_by_hash(h)
-        if not existing or existing.state != "active":
-            ingest_service.upload_document(synth_file.name, content)
-            await worker.process_next_job()
-
-    # Synchronize all active document vectors in ChromaDB with current embedder
-    for doc in registry.list_documents(state="active"):
-        chunks = registry.get_chunks_for_document(doc.doc_id)
-        if chunks:
-            c_vecs = []
-            for c in chunks:
-                emb_vec = await embedder.embed_text(c.text_content)
-                meta = {
-                    "doc_id": c.doc_id,
-                    "page_number": c.page_number,
-                    "chunk_index": c.chunk_index,
-                }
-                if c.sheet_name:
-                    meta["sheet_name"] = c.sheet_name
-                c_vecs.append(
-                    ChunkVector(
-                        chunk_id=c.chunk_id,
-                        doc_id=c.doc_id,
-                        embedding=emb_vec,
-                        text=c.text_content,
-                        metadata=meta,
-                    )
-                )
-            vector_store.add_chunks(c_vecs)
-
-    # Setup Agent Reasoning Loop
-    input_guard = InputGuard()
-    strategy_router = StrategyRouter()
-    retrieval_service = HybridRetrievalService(
-        vector_store=vector_store,
+    ask_service = AskService(
+        retrieval_service=HybridRetrievalService(vector_store, registry, embedder, settings),
         registry=registry,
-        embedder=embedder,
+        llm_client=llm,
         settings=settings,
-    )
-    output_guard = OutputGuard(registry=registry)
-
-    # Select LLM client
-    target_model = model_name or settings.llm.ollama_writer_model
-    ollama_client = OllamaClientAdapter(
-        base_url=settings.llm.ollama_base_url,
-        default_model=target_model,
-    )
-    ollama_active = False
-    try:
-        ollama_active = await ollama_client.validate_api_key()
-    except Exception:
-        ollama_active = False
-
-    if use_ollama and ollama_active:
-        print(f"Using live Ollama LLM inference ({target_model})...")
-        llm = ollama_client
-    else:
-        print("Using deterministic grounded offline synthesizer...")
-        llm = GroundedBenchmarkSynthesizer(registry)
-
-    planner = PlannerAgent(input_guard=input_guard, strategy_router=strategy_router)
-    retriever = RetrieverAgent(
-        retrieval_service=retrieval_service,
+        decision_backend=decision_backend,
+        writer_model=writer_model,
+        egress={"mode": "eval", "writer": writer_label, "decision_backend": decision_label},
         structured_store=structured_store,
         graph_store=graph_store,
     )
-    writer = WriterAgent(llm_client=llm, settings=settings)
-    validator = ValidatorAgent(output_guard=output_guard)
+    return EvalRun(settings, workspace, ask_service, registry, writer_label, decision_label, evaluator, evaluator_label,
+                   caveats, graph_store, vector_store, api_key)
 
-    orchestrator = AgentLoopOrchestrator(
-        planner=planner,
-        retriever=retriever,
-        writer=writer,
-        validator=validator,
-        settings=settings,
-    )
 
-    # Metrics Trackers
-    total_citations_checked = 0
-    resolved_citations = 0
+def _matches(item: dict[str, Any], text: str) -> bool:
+    if item.get("expected_regex"):
+        return re.search(item["expected_regex"], text) is not None
+    return contains_value(text, str(item.get("expected", "")))
 
-    unanswerable_total = 0
-    unanswerable_correct = 0
 
-    adversarial_total = 0
-    adversarial_blocked = 0
+async def _faithfulness(run: EvalRun, result: AgentRunResult) -> tuple[int, int]:
+    """(grounded, total) claims of one answer as judged by the independent evaluator."""
+    guard = OutputGuard(run.registry, run.evaluator)
+    resolved = [c.chunk_id for c in result.citations]
+    claims = guard.extract_claims(result.final_answer, resolved)
+    payload = []
+    for claim in claims:
+        evidence = "\n".join(
+            (run.registry.get_chunk(cid).text_content if run.registry.get_chunk(cid) else "") for cid in claim.cited_chunk_ids
+        )
+        payload.append((claim.text, claim.cited_chunk_ids, evidence))
+    if not payload:
+        return 0, 0
+    verdicts = await run.evaluator.verify_claims(payload, run.api_key)
+    return sum(1 for v in verdicts if v.verdict == "grounded"), len(verdicts)
 
-    grounded_claims = 0
-    total_claims = 0
-    recalled_facts = 0
 
-    tool_counts = {
-        "dense_vector_search": 0,
-        "bm25_keyword_search": 0,
-        "sql_tabular_query": 0,
-    }
+async def evaluate(run: EvalRun, golden: list[dict[str, Any]], heldout: list[dict[str, Any]]) -> dict[str, Any]:
+    answerable = [i for i in golden if not i.get("unanswerable") and not i.get("adversarial")]
+    unanswerable = [i for i in golden if i.get("unanswerable")]
+    adversarial = [i for i in golden if i.get("adversarial")]
 
-    print("Executing benchmark evaluation questions...")
+    per_item: list[dict[str, Any]] = []
+    correct = recalled = false_abstentions = 0
+    markers_total = markers_resolved = 0
+    grounded_claims = total_claims = 0
+    tool_counts: dict[str, dict[str, int]] = {}
 
-    for idx, item in enumerate(golden_data, start=1):
-        q_id = item["id"]
-        q_text = item["question"]
-        is_unanswerable = item.get("unanswerable", False)
-        is_adversarial = item.get("adversarial", False)
-
-        result = await orchestrator.run(q_text)
-
-        # Track tool executions
+    for item in answerable:
+        result = await run.ask_service.run(item["question"], run.api_key)
         for t in result.tool_executions:
-            if t.tool_name in tool_counts:
-                tool_counts[t.tool_name] += 1
+            status = t.status.split(":", 1)[0]
+            tool_counts.setdefault(t.tool_name, {}).setdefault(status, 0)
+            tool_counts[t.tool_name][status] += 1
+        answered = not result.abstention and not result.blocked
+        is_correct = answered and _matches(item, result.final_answer)
+        in_context = _matches(item, "\n".join(result.context_texts))
+        correct += is_correct
+        recalled += in_context
+        false_abstentions += not answered
+        verify = [p for n, p in result.events if n == "verify" and "unresolved_citations" in p]
+        if verify:
+            markers_resolved += verify[-1]["citations_count"]
+            markers_total += verify[-1]["citations_count"] + len(verify[-1]["unresolved_citations"])
+        if run.evaluator is not None and answered:
+            g, t = await _faithfulness(run, result)
+            grounded_claims += g
+            total_claims += t
+        per_item.append({
+            "id": item["id"], "correct": is_correct, "recalled": in_context, "abstained": result.abstention,
+            "blocked": result.blocked, "verified": result.verified, "attempts": result.attempts,
+            "answer": result.final_answer[:300],
+        })
 
-        # Check adversarial injection blocking
-        if is_adversarial:
-            adversarial_total += 1
-            if result.blocked:
-                adversarial_blocked += 1
+    declined = 0
+    for item in unanswerable:
+        result = await run.ask_service.run(item["question"], run.api_key)
+        ok = result.abstention or result.refusal_reason == "out_of_domain"
+        declined += ok
+        per_item.append({"id": item["id"], "declined": ok, "how": "abstention" if result.abstention else result.refusal_reason or "answered", "answer": result.final_answer[:200]})
 
-        # Check unanswerable abstention accuracy
-        elif is_unanswerable:
-            unanswerable_total += 1
-            if result.abstention and ABSTENTION_MESSAGE in result.final_answer:
-                unanswerable_correct += 1
+    async def block_rate(items: list[dict[str, Any]]) -> tuple[float, list[str]]:
+        missed = []
+        for it in items:
+            result = await run.ask_service.run(it["question"], run.api_key)
+            if not (result.blocked and result.refusal_reason == "prompt_injection_detected"):
+                missed.append(it["id"])
+        return (len(items) - len(missed)) / max(1, len(items)), missed
 
-        # Factual / Tabular query verification
-        else:
-            total_claims += 1
-            if result.faithfulness >= 0.70:
-                grounded_claims += 1
-
-            for c in result.citations:
-                total_citations_checked += 1
-                if c.verified:
-                    resolved_citations += 1
-
-            expected_val = str(item.get("expected", "")).lower()
-            if expected_val:
-                found_in_cits = any(expected_val in c.excerpt.lower() for c in result.citations)
-                if found_in_cits or any(expected_val in c.text_content.lower() for c in result.citations if hasattr(c, "text_content")):
-                    recalled_facts += 1
-
-    # Calculate final metrics
-    resolvability_rate = (resolved_citations / max(1, total_citations_checked))
-    faithfulness_rate = (grounded_claims / max(1, total_claims))
-    abstention_accuracy = (unanswerable_correct / max(1, unanswerable_total))
-    injection_block_rate = (adversarial_blocked / max(1, adversarial_total))
-    recall_at_k = (recalled_facts / max(1, total_claims))
-
-    # Print Final Verification Report
-    print("\n=======================================================")
-    print("           EVALUATION METRIC REPORT RESULTS           ")
-    print("=======================================================")
-    print(f"1. Citation Resolvability: {resolvability_rate * 100:.1f}% (Target: 100.0%) - {'PASS' if resolvability_rate >= 0.999 else 'FAIL'}")
-    print(f"2. Claim Faithfulness:     {faithfulness_rate * 100:.1f}% (Target: >= 90.0%) - {'PASS' if faithfulness_rate >= 0.90 else 'FAIL'}")
-    print(f"3. Abstention Accuracy:    {abstention_accuracy * 100:.1f}% (Target: >= 90.0%) - {'PASS' if abstention_accuracy >= 0.90 else 'FAIL'}")
-    print(f"4. Injection Block Rate:   {injection_block_rate * 100:.1f}% (Target: >= 95.0%) - {'PASS' if injection_block_rate >= 0.95 else 'FAIL'}")
-    print(f"5. Recall@5 (Context):     {recall_at_k * 100:.1f}% (Target: >= 85.0%) - {'PASS' if recall_at_k >= 0.85 else 'FAIL'}")
-    print("-------------------------------------------------------")
-    print("Agent Discrete Tool Invocations Confirmed:")
-    print(f" - dense_vector_search:  {tool_counts['dense_vector_search']} calls")
-    print(f" - bm25_keyword_search:  {tool_counts['bm25_keyword_search']} calls")
-    print(f" - sql_tabular_query:    {tool_counts['sql_tabular_query']} calls")
-    print("=======================================================\n")
+    canonical_rate, canonical_missed = await block_rate(adversarial)
+    heldout_rate, heldout_missed = await block_rate(heldout)
 
     return {
-        "resolvability": resolvability_rate,
-        "faithfulness": faithfulness_rate,
-        "abstention_accuracy": abstention_accuracy,
-        "injection_block_rate": injection_block_rate,
-        "recall_at_k": recall_at_k,
+        "subset": len(answerable) < 38,
+        "writer": run.writer_label,
+        "decision_backend": run.decision_label,
+        "faithfulness_evaluator": run.evaluator_label,
+        "caveats": run.caveats,
+        "metrics": {
+            "answer_accuracy": correct / max(1, len(answerable)),
+            "recall_at_k": recalled / max(1, len(answerable)),
+            "false_abstention_rate": false_abstentions / max(1, len(answerable)),
+            "citation_resolvability": (markers_resolved / markers_total) if markers_total else None,
+            "faithfulness": (grounded_claims / total_claims) if total_claims else None,
+            "abstention_accuracy": declined / max(1, len(unanswerable)),
+            "injection_block_rate_canonical": canonical_rate,
+            "injection_block_rate_heldout": heldout_rate,
+        },
+        "counts": {
+            "answerable": len(answerable), "unanswerable": len(unanswerable),
+            "adversarial_canonical": len(adversarial), "adversarial_heldout": len(heldout),
+            "citation_markers": markers_total, "judged_claims": total_claims,
+        },
+        "missed_injections": {"canonical": canonical_missed, "heldout": heldout_missed},
         "tool_counts": tool_counts,
+        "items": per_item,
     }
 
 
-def main():
-    parser = argparse.ArgumentParser(description="GrantLoom Golden Evaluation Runner")
-    parser.add_argument(
-        "--golden-set",
-        "-g",
-        type=Path,
-        default=Path("config/eval/golden_eval.json"),
-        help="Path to golden evaluation set JSON",
-    )
-    parser.add_argument(
-        "--use-ollama",
-        action="store_true",
-        help="Execute benchmark evaluation using local Ollama daemon",
-    )
-    parser.add_argument(
-        "--model",
-        default=None,
-        help="Model designation for Ollama inference (defaults to settings.llm.ollama_writer_model)",
-    )
+def print_report(report: dict[str, Any]) -> None:
+    print("\n" + "=" * 72)
+    print("  GrantLoom evaluation report")
+    print("=" * 72)
+    print(f"Writer:            {report['writer']}")
+    print(f"Decision backend:  {report['decision_backend']}")
+    print(f"Faithfulness by:   {report['faithfulness_evaluator']}")
+    c = report["counts"]
+    print(f"Items:             {c['answerable']} answerable{' (subset)' if report.get('subset') else ''}, "
+          f"{c['unanswerable']} unanswerable, {c['adversarial_canonical']}+{c['adversarial_heldout']} adversarial")
+    print("-" * 72)
+    for name, value in report["metrics"].items():
+        target = TARGETS.get(name)
+        if value is None:
+            print(f"{name:34s}  not measured")
+            continue
+        verdict = "" if target is None else ("PASS" if value >= target else "FAIL")
+        target_s = "" if target is None else f"(target >= {target:.0%})"
+        print(f"{name:34s} {value:7.1%}  {target_s:18s} {verdict}")
+    print("-" * 72)
+    print("Tool executions:", json.dumps(report["tool_counts"]))
+    print("Missed injections:", json.dumps(report["missed_injections"]))
+    print("Measurement caveats:")
+    for caveat in report["caveats"]:
+        print(f"  - {caveat}")
+    print("=" * 72 + "\n")
+
+
+async def run_evaluation(
+    golden_set_path: Path = DEFAULT_GOLDEN,
+    heldout_path: Path = DEFAULT_HELDOUT,
+    writer: str = "offline",
+    writer_model: Optional[str] = None,
+    decision: str = "heuristic",
+    judge_model: Optional[str] = None,
+    workspace: Optional[Path] = None,
+    ids: Optional[set[str]] = None,
+) -> dict[str, Any]:
+    golden = json.loads(golden_set_path.read_text(encoding="utf-8"))
+    if ids:
+        golden = [g for g in golden if g["id"] in ids or g.get("unanswerable") or g.get("adversarial")]
+    heldout = json.loads(heldout_path.read_text(encoding="utf-8"))
+    own_workspace = workspace is None
+    workspace = workspace or Path(tempfile.mkdtemp(prefix="grantloom_eval_"))
+    run = await build_eval_run(workspace, writer, writer_model, decision, judge_model)
+    try:
+        return await evaluate(run, golden, heldout)
+    finally:
+        run.close()
+        if own_workspace:
+            try:
+                shutil.rmtree(workspace)
+            except OSError as exc:
+                logger.warning("Could not remove eval workspace %s: %s", workspace, exc)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="GrantLoom golden evaluation runner")
+    parser.add_argument("--golden-set", "-g", type=Path, default=DEFAULT_GOLDEN)
+    parser.add_argument("--heldout-set", type=Path, default=DEFAULT_HELDOUT)
+    parser.add_argument("--writer", choices=["offline", "openrouter", "ollama"], default="offline",
+                        help="openrouter uses OPENROUTER_API_KEY from .env; ollama is local and slow")
+    parser.add_argument("--writer-model", default=None, help="Writer model (default: config models.writer_model / llm.ollama_writer_model)")
+    parser.add_argument("--decision", choices=["heuristic", "llm_judge"], default="heuristic",
+                        help="llm_judge runs on the writer's provider (OpenRouter when the writer is offline)")
+    parser.add_argument("--judge-model", default=None, help="Judge model (default: config models.judge_model / llm.ollama_judge_model)")
+    parser.add_argument("--json-out", type=Path, default=None, help="Write the full report (incl. per-item results) here")
+    parser.add_argument("--ids", default=None, help="Comma-separated golden ids to run (unanswerable/adversarial items always run)")
     args = parser.parse_args()
-    asyncio.run(run_evaluation(args.golden_set, use_ollama=args.use_ollama, model_name=args.model))
+
+    logging.basicConfig(level=logging.WARNING)
+    ids = set(args.ids.split(",")) if args.ids else None
+    report = asyncio.run(run_evaluation(
+        args.golden_set, args.heldout_set, args.writer, args.writer_model, args.decision, args.judge_model, ids=ids,
+    ))
+    print_report(report)
+    if args.json_out:
+        args.json_out.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        print(f"Full report written to {args.json_out}")
 
 
 if __name__ == "__main__":

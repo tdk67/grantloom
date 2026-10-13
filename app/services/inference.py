@@ -1,0 +1,172 @@
+"""Explicit inference wiring: which provider serves the writer and judge roles, and with which key.
+
+The provider is chosen by `llm.private_mode` only — never by whether a server-side key happens to
+exist — so BYOK validation always reaches OpenRouter when private mode is off (review-02 §4.1):
+
+| private_mode | writer / judge / Tier-2 / SQL | BYOK header       | data egress              |
+|--------------|-------------------------------|-------------------|--------------------------|
+| false        | OpenRouter                    | required, probed  | openrouter.ai            |
+| true         | local Ollama                  | not used          | none (local daemon)      |
+
+Embeddings are configured separately (`models.embedding_backend`) and reported in the egress event.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import time
+from dataclasses import dataclass
+from typing import Any, Callable, Optional
+
+from app.adapters.decision_backends import (
+    FallbackDecisionBackend,
+    HeuristicDecisionBackend,
+    LLMJudgeDecisionBackend,
+)
+from app.adapters.embedder_adapter import DeterministicEmbedder, OpenRouterEmbedder
+from app.adapters.ollama_client import OllamaClientAdapter
+from app.adapters.openrouter_client import OpenRouterClientAdapter
+from app.core.config import Settings, model_family
+from app.core.errors import AuthenticationError
+from app.ports.decision_backend import DecisionBackendPort
+from app.ports.embedder import EmbedderPort
+from app.ports.llm_client import LLMClientPort
+
+logger = logging.getLogger("grantloom.services.inference")
+
+
+class ValidatedKeyCache:
+    """Remembers recently validated BYOK keys by SHA-256 digest only (the key itself is never stored),
+    so the live auth probe does not add a provider round-trip to every request."""
+
+    def __init__(self, ttl_seconds: int) -> None:
+        self.ttl_seconds = ttl_seconds
+        self._expiry: dict[str, float] = {}
+
+    @staticmethod
+    def _digest(key: str) -> str:
+        return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+    def is_fresh(self, key: str) -> bool:
+        return self._expiry.get(self._digest(key), 0.0) > time.monotonic()
+
+    def remember(self, key: str) -> None:
+        if self.ttl_seconds > 0:
+            self._expiry[self._digest(key)] = time.monotonic() + self.ttl_seconds
+
+
+@dataclass(frozen=True)
+class InferenceProfile:
+    """Resolved provider + role models for one deployment mode."""
+
+    mode: str  # "byok" or "private"
+    client: LLMClientPort
+    writer_model: str
+    judge_model: str
+    embedding_description: str
+    key_cache: Optional[ValidatedKeyCache] = None
+
+    @property
+    def requires_byok_key(self) -> bool:
+        return self.mode == "byok"
+
+    async def authorize(self, byok_key: Optional[str]) -> Optional[str]:
+        """FR-Q1: in BYOK mode the header is mandatory and probed live against the provider.
+
+        Returns the key to use for inference (None in private mode, where keys are never sent anywhere).
+        """
+        if not self.requires_byok_key:
+            return None
+        if not byok_key or not byok_key.strip():
+            raise AuthenticationError("Header 'X-OpenRouter-Key' is required for query inference.")
+        key = byok_key.strip()
+        if self.key_cache is None or not self.key_cache.is_fresh(key):
+            await self.client.validate_api_key(key)
+            if self.key_cache is not None:
+                self.key_cache.remember(key)
+        return key
+
+    def egress(self, decision_backend: DecisionBackendPort) -> dict[str, Any]:
+        """FR-Q10 egress/provenance payload streamed to the UI before any model call."""
+        return {
+            "mode": self.mode,
+            "provider": self.client.provider,
+            "destination": self.client.destination,
+            "data_leaves_machine": self.mode == "byok",
+            "writer_model": self.writer_model,
+            "judge_model": self.judge_model,
+            "decision_backend": decision_backend.name,
+            "decision_fallback": getattr(getattr(decision_backend, "fallback", None), "name", None),
+            "embeddings": self.embedding_description,
+        }
+
+
+def build_inference_profile(settings: Settings) -> InferenceProfile:
+    if settings.llm.private_mode:
+        client: LLMClientPort = OllamaClientAdapter(
+            base_url=settings.llm.ollama_base_url,
+            timeout_seconds=settings.timeouts.ollama_seconds,
+            probe_timeout_seconds=settings.timeouts.probe_seconds,
+            log_full_prompts=settings.logging.log_full_prompts,
+        )
+        return InferenceProfile(
+            mode="private",
+            client=client,
+            writer_model=settings.llm.ollama_writer_model,
+            judge_model=settings.llm.ollama_judge_model,
+            embedding_description=describe_embeddings(settings),
+        )
+    client = OpenRouterClientAdapter(
+        base_url=settings.llm.openrouter_base_url,
+        timeout_seconds=settings.timeouts.openrouter_seconds,
+        log_full_prompts=settings.logging.log_full_prompts,
+    )
+    return InferenceProfile(
+        mode="byok",
+        client=client,
+        writer_model=settings.models.writer_model,
+        judge_model=settings.models.judge_model,
+        embedding_description=describe_embeddings(settings),
+        key_cache=ValidatedKeyCache(settings.llm.byok_validation_ttl_seconds),
+    )
+
+
+def describe_embeddings(settings: Settings) -> str:
+    if settings.models.embedding_backend == "openrouter":
+        return f"openrouter:{settings.models.embedding_model} (server key)"
+    return "deterministic lexical hashing (local, not semantic)"
+
+
+def build_embedder(settings: Settings) -> EmbedderPort:
+    """Fail fast instead of silently switching embedding spaces when the configured backend is unusable."""
+    if settings.models.embedding_backend == "openrouter":
+        return OpenRouterEmbedder(
+            api_key=settings.secrets.openrouter_api_key or "",
+            model=settings.models.embedding_model,
+            base_url=settings.llm.openrouter_base_url,
+            timeout_seconds=settings.timeouts.embedding_seconds,
+            dimension=settings.models.embedding_dimension,
+        )
+    return DeterministicEmbedder(dimension=settings.models.embedding_dimension)
+
+
+def build_decision_backend(
+    settings: Settings,
+    profile: InferenceProfile,
+    corpus_overlap: Optional[Callable[[str], float]] = None,
+) -> DecisionBackendPort:
+    heuristic = HeuristicDecisionBackend(settings.decision.heuristic, corpus_overlap)
+    if settings.decision.backend == "heuristic":
+        return heuristic
+    judge = LLMJudgeDecisionBackend(profile.client, profile.judge_model, settings.decision)
+    return FallbackDecisionBackend(primary=judge, fallback=heuristic)
+
+
+def evaluator_independence_problems(writer_model: str, judge_model: str) -> list[str]:
+    """NFR-6: the judge must not share a model family with the writer."""
+    if writer_model == judge_model:
+        return [f"judge model '{judge_model}' is identical to the writer model"]
+    if model_family(writer_model) == model_family(judge_model):
+        return [f"judge '{judge_model}' and writer '{writer_model}' share model family '{model_family(judge_model)}'"]
+    return []

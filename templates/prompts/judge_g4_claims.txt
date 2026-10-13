@@ -1,0 +1,8 @@
+Verify each claim strictly against the evidence it cites. Use only the evidence text, not outside knowledge.
+- "grounded": every fact in the claim (numbers, names, dates, conditions) is stated in or directly computable from the evidence.
+- "unsupported": the evidence does not establish the claim, or the claim overstates it.
+- "contradicted": the evidence states something incompatible with the claim.
+
+<<CLAIMS>>
+
+Respond with JSON: {"claims": [{"id": "K1", "verdict": "grounded|unsupported|contradicted", "reason": "<short reason>"}, ...]} covering every claim id.

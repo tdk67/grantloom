@@ -179,6 +179,8 @@ For calibration, we need **50 manually curated Q&A pairs** across 5 query catego
 
 ## Part 3: Jev Decision Model for Guardrails & RAG Routing
 
+> **Status (2026-10-13, decisions-log D22): Jev and Julia-1 are deferred and not implemented.** The gates below run on the `DecisionBackendPort` with the prompt-based `llm_judge` backend (default) and the regex/lexical `heuristic` fallback described in §3.6. Configuring `decision.backend: "jev"` or `"julia1"` is rejected at startup. This part remains the design target for a future Jev/Julia-1 adapter.
+
 ### 3.1 What Is Jev?
 
 Jev is **TypeSafe AI's "System One" decision model** (site: jevmodel.org) — a small, fast, cheap model that produces **typed verdicts** instead of free-form chat. Vendor claims (speed, price) are **unverified** here; benchmark before relying on them.

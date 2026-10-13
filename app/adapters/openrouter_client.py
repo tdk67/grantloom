@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any, AsyncIterator, Optional
+from urllib.parse import urlparse
 
 import httpx
 
@@ -18,19 +19,49 @@ from app.ports.llm_client import LLMClientPort
 
 logger = logging.getLogger("grantloom.adapters.openrouter_client")
 
-OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
-
-
 class OpenRouterClientAdapter(LLMClientPort):
     """Client for OpenRouter inference and live BYOK credential validation."""
 
     def __init__(
         self,
-        base_url: str = OPENROUTER_DEFAULT_BASE_URL,
-        timeout: float = 60.0,
+        base_url: str,
+        timeout_seconds: float,
+        log_full_prompts: bool,
     ) -> None:
         self.base_url = base_url.rstrip("/")
-        self.timeout = timeout
+        self.timeout = timeout_seconds
+        self.log_full_prompts = log_full_prompts
+
+    @property
+    def provider(self) -> str:
+        return "openrouter"
+
+    @property
+    def destination(self) -> str:
+        return urlparse(self.base_url).netloc or self.base_url
+
+    def _log_call(self, model: str, prompt: str, system_prompt: Optional[str]) -> None:
+        logger.info("OpenRouter call model=%s prompt_chars=%d", model, len(prompt) + len(system_prompt or ""))
+        if self.log_full_prompts:
+            logger.info("OpenRouter prompt (model=%s):\nSYSTEM: %s\nUSER: %s", model, system_prompt or "", prompt)
+
+    async def describe_model(self, model: str, api_key: Optional[str] = None) -> dict[str, Any]:
+        """Model facts from OpenRouter's public /models catalog (supported_parameters, context_length)."""
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                resp = await client.get(f"{self.base_url}/models")
+        except httpx.RequestError as exc:
+            raise UpstreamServiceError(f"Failed to fetch OpenRouter model catalog: {exc}") from exc
+        if resp.status_code != 200:
+            raise UpstreamServiceError(f"OpenRouter /models returned HTTP {resp.status_code}")
+        entry = next((m for m in resp.json().get("data", []) if m.get("id") == model), None)
+        if entry is None:
+            return {"found": False, "tool_calling": False, "context_length": None}
+        return {
+            "found": True,
+            "tool_calling": "tools" in (entry.get("supported_parameters") or []),
+            "context_length": entry.get("context_length"),
+        }
 
     async def validate_api_key(self, api_key: str) -> bool:
         """Validate API key live against OpenRouter /api/v1/auth/key probe.
@@ -74,14 +105,13 @@ class OpenRouterClientAdapter(LLMClientPort):
 
         # Inspect data payload for usage vs credit limits if present
         try:
-            payload = response.json()
-            data = payload.get("data", {})
-            limit = data.get("limit")
-            usage = data.get("usage", 0)
-            if limit is not None and usage is not None and usage >= limit:
-                raise PaymentRequiredError("OpenRouter account credit limit reached.")
-        except (json.JSONDecodeError, KeyError):
-            pass
+            data = response.json().get("data", {})
+        except json.JSONDecodeError as exc:
+            raise UpstreamServiceError("OpenRouter auth probe returned a non-JSON body.") from exc
+        limit = data.get("limit")
+        usage = data.get("usage", 0)
+        if limit is not None and usage is not None and usage >= limit:
+            raise PaymentRequiredError("OpenRouter account credit limit reached.")
 
         return True
 
@@ -92,10 +122,12 @@ class OpenRouterClientAdapter(LLMClientPort):
         system_prompt: Optional[str] = None,
         temperature: float = 0.0,
         api_key: Optional[str] = None,
+        json_output: bool = False,
     ) -> str:
         """Execute single-turn chat completion."""
         if not api_key:
             raise AuthenticationError("API key is required for inference.")
+        self._log_call(model, prompt, system_prompt)
 
         url = f"{self.base_url}/chat/completions"
         headers = {
@@ -116,6 +148,8 @@ class OpenRouterClientAdapter(LLMClientPort):
             "temperature": temperature,
             "stream": False,
         }
+        if json_output:
+            body["response_format"] = {"type": "json_object"}
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -151,6 +185,7 @@ class OpenRouterClientAdapter(LLMClientPort):
         """Stream generated response tokens from OpenRouter SSE endpoint."""
         if not api_key:
             raise AuthenticationError("API key is required for inference.")
+        self._log_call(model, prompt, system_prompt)
 
         url = f"{self.base_url}/chat/completions"
         headers = {

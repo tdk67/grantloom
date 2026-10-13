@@ -1,0 +1,15 @@
+Write one read-only SQLite SELECT statement that answers the question from the spreadsheet tables below.
+Rules: a single SELECT (CTEs allowed), only the listed tables and columns, double-quote identifiers, no comments.
+Match text values loosely with LIKE '%keyword%'; the sample rows show how labels are actually written.
+Always include the "row_number" column when returning individual rows so results can be cited. For totals use SUM(...) with a descriptive alias.
+If the tables cannot answer the question, return {"sql": null}.
+
+Tables:
+<<SCHEMAS>>
+
+Question:
+<untrusted>
+<<QUERY>>
+</untrusted>
+
+Respond with JSON: {"sql": "<SELECT ...>" or null, "table": "<primary table name>" or null}

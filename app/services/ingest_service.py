@@ -9,8 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Optional
 
-from app.core.config import Settings, get_settings
-from app.core.errors import DocumentLimitExceededError, ExtractionError, ValidationError
+from app.core.config import Settings
+from app.core.errors import ConflictError, DocumentLimitExceededError, DocumentNotFoundError, ValidationError
 from app.ports.models import DocumentRecord
 from app.ports.registry import RegistryPort
 
@@ -37,15 +37,12 @@ class IngestionService:
     def __init__(
         self,
         registry: RegistryPort,
-        settings: Optional[Settings] = None,
+        settings: Settings,
         upload_dir: Optional[str | Path] = None,
     ) -> None:
         self.registry = registry
-        self.settings = settings or get_settings()
-        if upload_dir is None:
-            self.upload_dir = Path("data/uploads")
-        else:
-            self.upload_dir = Path(upload_dir)
+        self.settings = settings
+        self.upload_dir = Path(upload_dir) if upload_dir is not None else Path(settings.database.uploads_path)
         self.upload_dir.mkdir(parents=True, exist_ok=True)
 
     def upload_document(self, filename: str, file_bytes: bytes) -> IngestionUploadResult:
@@ -106,36 +103,11 @@ class IngestionService:
 
         content_hash = hasher.hexdigest()
 
-        # Check deduplication: does this content hash already exist?
+        # Check deduplication: does this content hash already exist? (FR-I2)
         existing = self.registry.get_document_by_hash(content_hash)
         if existing:
-            # Clean up temp file
-            if temp_path.exists():
-                temp_path.unlink()
-
-            if existing.state == "active":
-                return IngestionUploadResult(
-                    doc_id=existing.doc_id,
-                    filename=existing.filename,
-                    content_hash=existing.content_hash,
-                    file_type=existing.file_type,
-                    state="active",
-                    is_duplicate=True,
-                    message="Document already indexed",
-                    record=existing,
-                )
-            elif existing.state in ("uploaded", "extracting", "chunking", "embedding"):
-                return IngestionUploadResult(
-                    doc_id=existing.doc_id,
-                    filename=existing.filename,
-                    content_hash=existing.content_hash,
-                    file_type=existing.file_type,
-                    state=existing.state,
-                    is_duplicate=True,
-                    message="Document is currently being processed",
-                    record=existing,
-                )
-
+            temp_path.unlink(missing_ok=True)
+            return self._handle_duplicate(existing)
         # Check total document capacity limit
         current_doc_count = self.registry.count_documents()
         if current_doc_count >= self.settings.limits.max_documents:
@@ -144,6 +116,10 @@ class IngestionService:
             raise DocumentLimitExceededError(
                 f"Maximum document capacity ({self.settings.limits.max_documents}) reached. Cannot index more documents."
             )
+
+        # Same filename with new content -> next version of that document (FR-I2)
+        previous = self.registry.get_latest_document_by_filename(filename)
+        version = previous.version + 1 if previous else 1
 
         # Create new document record
         doc_id = f"doc_{uuid.uuid4().hex[:12]}"
@@ -157,12 +133,15 @@ class IngestionService:
             file_type=ext,
             page_count=0,
             state="uploaded",
-            version=1,
+            version=version,
             created_at="",
             file_path=str(final_path),
             metadata={
                 "file_size_bytes": bytes_written,
                 "original_filename": filename,
+                "stage": "uploaded",
+                "progress_pct": 0,
+                **({"previous_version_doc_id": previous.doc_id} if previous else {}),
             },
         )
 
@@ -171,7 +150,7 @@ class IngestionService:
         self.registry.log_audit_event(
             event_type="document_uploaded",
             doc_id=doc_id,
-            details={"filename": filename, "content_hash": content_hash, "file_size": bytes_written},
+            details={"filename": filename, "content_hash": content_hash, "file_size": bytes_written, "version": version},
         )
 
         logger.info("Enqueued document '%s' (ID: %s, Hash: %s) for ingestion.", filename, doc_id, content_hash)
@@ -183,6 +162,51 @@ class IngestionService:
             file_type=ext,
             state="uploaded",
             is_duplicate=False,
-            message="Document accepted and queued for processing",
+            message="Document accepted and queued for processing" + (f" as version {version}" if version > 1 else ""),
             record=record,
         )
+
+    IN_FLIGHT_STATES = ("uploaded", "extracting", "chunking", "scanning", "embedding", "indexing")
+
+    def _handle_duplicate(self, existing: DocumentRecord) -> IngestionUploadResult:
+        """Identical bytes were uploaded before: never insert a second row for the same hash."""
+        def result(state: str, message: str) -> IngestionUploadResult:
+            return IngestionUploadResult(
+                doc_id=existing.doc_id,
+                filename=existing.filename,
+                content_hash=existing.content_hash,
+                file_type=existing.file_type,
+                state=state,
+                is_duplicate=True,
+                message=message,
+                record=existing,
+            )
+
+        if existing.state == "active":
+            return result("active", "Document already indexed")
+        if existing.state in self.IN_FLIGHT_STATES:
+            return result(existing.state, "Document is currently being processed")
+        if existing.state == "failed":
+            self.registry.update_document_state(
+                existing.doc_id, state="uploaded", error_message="", metadata_update={"stage": "uploaded", "progress_pct": 0},
+            )
+            self.registry.create_outbox_job(doc_id=existing.doc_id, stage="extracting")
+            self.registry.log_audit_event("document_requeued", existing.doc_id, {"reason": "re-upload of failed document"})
+            return result("uploaded", "Previously failed document re-queued for processing")
+        if existing.state == "quarantined":
+            raise ConflictError(
+                f"Identical content was quarantined as document '{existing.doc_id}'. Review it and release or delete it first."
+            )
+        raise ConflictError(f"Identical content belongs to document '{existing.doc_id}', which is being deleted.")
+
+    def request_deletion(self, doc_id: str) -> DocumentRecord:
+        """FR-I6: mark the document 'deleting' (immediately excluded from retrieval and citations) and
+        enqueue the purge saga for the worker. Idempotent for documents already being deleted."""
+        doc = self.registry.get_document(doc_id)
+        if doc is None:
+            raise DocumentNotFoundError(f"Document with ID '{doc_id}' not found.")
+        if doc.state != "deleting":
+            self.registry.update_document_state(doc_id, state="deleting", metadata_update={"stage": "deleting"})
+            self.registry.create_outbox_job(doc_id=doc_id, stage="deleting")
+            self.registry.log_audit_event("document_deletion_requested", doc_id, {"filename": doc.filename})
+        return doc

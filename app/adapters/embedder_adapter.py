@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
-from typing import Optional, Sequence
+from typing import Sequence
 
 import httpx
 
@@ -15,15 +15,19 @@ from app.ports.embedder import EmbedderPort
 
 
 class DeterministicEmbedder(EmbedderPort):
-    """Deterministic, zero-dependency embedder generating fixed-dimension dense vectors.
-    
-    Used for local testing, integration benchmarks, and environments without active LLM keys.
-    Uses token-level feature hashing to preserve semantic token overlap and produce
-    near-orthogonal vectors for out-of-domain queries.
+    """Deterministic, zero-dependency lexical embedder (token + bigram feature hashing).
+
+    NOT a semantic model: similarity reflects shared tokens, not meaning. Used for offline
+    development, tests, and the offline eval smoke run. Select it explicitly with
+    `models.embedding_backend: "deterministic"`.
     """
 
-    def __init__(self, dimension: int = 1536) -> None:
+    def __init__(self, dimension: int) -> None:
         self.dimension = dimension
+
+    @property
+    def fingerprint(self) -> str:
+        return f"deterministic-hash-v1:{self.dimension}"
 
     async def embed_text(self, text: str) -> list[float]:
         return self._compute_deterministic_vector(text)
@@ -57,51 +61,47 @@ class DeterministicEmbedder(EmbedderPort):
 
 
 class OpenRouterEmbedder(EmbedderPort):
-    """Cloud embedding client calling OpenRouter / OpenAI embeddings endpoint."""
+    """Cloud embedding client calling the OpenRouter / OpenAI-compatible embeddings endpoint.
 
-    def __init__(
-        self,
-        api_key: Optional[str] = None,
-        model: str = "text-embedding-3-small",
-        base_url: str = "https://openrouter.ai/api/v1",
-        fallback_embedder: Optional[EmbedderPort] = None,
-    ) -> None:
+    Requires a server-side key; there is no silent fallback to another embedding space.
+    """
+
+    def __init__(self, api_key: str, model: str, base_url: str, timeout_seconds: float, dimension: int) -> None:
+        if not api_key:
+            raise LLMInferenceError("OpenRouterEmbedder requires OPENROUTER_API_KEY in .env.")
         self.api_key = api_key
         self.model = model
         self.base_url = base_url.rstrip("/")
-        self.fallback = fallback_embedder or DeterministicEmbedder()
+        self.timeout_seconds = timeout_seconds
+        self.dimension = dimension
+
+    @property
+    def fingerprint(self) -> str:
+        return f"openrouter:{self.model}:{self.dimension}"
 
     async def embed_text(self, text: str) -> list[float]:
         batch = await self.embed_batch([text])
         return batch[0]
 
     async def embed_batch(self, texts: Sequence[str]) -> list[list[float]]:
-        if not self.api_key:
-            return await self.fallback.embed_batch(texts)
-
         url = f"{self.base_url}/embeddings"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        payload = {
-            "model": self.model,
-            "input": list(texts),
-        }
+        payload = {"model": self.model, "input": list(texts)}
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
                 resp = await client.post(url, headers=headers, json=payload)
-                if resp.status_code != 200:
-                    raise LLMInferenceError(
-                        f"OpenRouter embedding failed with HTTP {resp.status_code}: {resp.text}"
-                    )
-                data = resp.json()
-                items = data.get("data", [])
-                # Sort by index in case API returns out of order
-                items.sort(key=lambda x: x.get("index", 0))
-                return [item["embedding"] for item in items]
-        except Exception as exc:
-            if isinstance(exc, LLMInferenceError):
-                raise
+        except httpx.RequestError as exc:
             raise LLMInferenceError(f"Embedding request failed: {exc}") from exc
+        if resp.status_code != 200:
+            raise LLMInferenceError(f"OpenRouter embedding failed with HTTP {resp.status_code}: {resp.text}")
+        items = sorted(resp.json().get("data", []), key=lambda x: x.get("index", 0))
+        vectors = [item["embedding"] for item in items]
+        if len(vectors) != len(texts) or any(len(v) != self.dimension for v in vectors):
+            raise LLMInferenceError(
+                f"Embedding response shape mismatch: expected {len(texts)} vectors of dimension {self.dimension}."
+            )
+        return vectors

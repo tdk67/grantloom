@@ -269,47 +269,38 @@
       </div>
 
       <div class="modal-body">
-        <div class="settings-tabs" role="tablist">
-          <button id="tab-provider-openrouter" class="subtab active" role="tab" aria-selected="true">OpenRouter Cloud (BYOK)</button>
-          <button id="tab-provider-ollama" class="subtab" role="tab" aria-selected="false">Local Ollama</button>
+        <!-- Server mode (read-only: decided by config/config.json on the server) -->
+        <div id="panel-server-mode" class="settings-panel">
+          <h4>Server Mode</h4>
+          <p id="server-mode-info" class="form-hint" aria-live="polite">Loading deployment information...</p>
+          <div class="panel-actions">
+            <button type="button" id="btn-check-models" class="btn btn-secondary">Check Configured Models</button>
+            <span id="models-probe-result" class="probe-result"></span>
+          </div>
         </div>
 
-        <!-- OpenRouter Panel -->
+        <!-- Master API key (X-API-Key) -->
+        <div class="settings-panel">
+          <div class="form-group">
+            <label for="input-master-key">Server Access Key (X-API-Key):</label>
+            <input type="password" id="input-master-key" class="form-input" placeholder="Required when the server sets MASTER_API_KEY">
+            <p class="form-hint">Stored only in this browser's IndexedDB and sent with every API request.</p>
+          </div>
+        </div>
+
+        <!-- OpenRouter BYOK key (only when the server runs in BYOK mode) -->
         <div id="panel-openrouter" class="settings-panel">
           <div class="form-group">
-            <label for="input-openrouter-key">OpenRouter API Key:</label>
+            <label for="input-openrouter-key">OpenRouter API Key (BYOK):</label>
             <div class="input-with-button">
               <input type="password" id="input-openrouter-key" class="form-input" placeholder="sk-or-v1-...">
               <button type="button" id="btn-toggle-key-visibility" class="btn btn-sm btn-secondary">Show</button>
             </div>
-            <p class="form-hint">Stored securely in browser IndexedDB. Never saved on disk in source files.</p>
+            <p class="form-hint">Stored only in this browser's IndexedDB. The server validates it per request and never stores or logs it.</p>
           </div>
           <div class="panel-actions">
             <button id="btn-test-key" class="btn btn-secondary">Probe API Key</button>
             <span id="key-probe-result" class="probe-result"></span>
-          </div>
-        </div>
-
-        <!-- Ollama Panel -->
-        <div id="panel-ollama" class="settings-panel hidden">
-          <div class="form-group">
-            <label for="input-ollama-url">Ollama Base URL:</label>
-            <input type="text" id="input-ollama-url" class="form-input" value="http://localhost:11434">
-          </div>
-          <div class="form-group">
-            <label for="select-ollama-model">Model:</label>
-            <div class="input-with-button">
-              <select id="select-ollama-model" class="form-select">
-                <option value="llama3.1:8b">llama3.1:8b</option>
-                <option value="mistral:7b">mistral:7b</option>
-                <option value="qwen2.5:7b">qwen2.5:7b</option>
-              </select>
-              <button type="button" id="btn-probe-ollama" class="btn btn-sm btn-secondary">Refresh</button>
-            </div>
-          </div>
-          <div class="panel-actions">
-            <button id="btn-test-ollama-tool" class="btn btn-secondary">Test Tool Calling</button>
-            <span id="ollama-probe-result" class="probe-result"></span>
           </div>
         </div>
 

@@ -95,7 +95,67 @@ class RegistryPort(ABC):
         ...
 
     @abstractmethod
-    def search_bm25(self, query: str, top_k: int = 10) -> list[KeywordSearchResult]:
-        """Perform full-text BM25 search over indexed chunks."""
+    def search_bm25(self, query: str, top_k: int) -> list[KeywordSearchResult]:
+        """Perform full-text BM25 search over chunks of active documents. Raises StorageError on failure."""
         ...
 
+    @abstractmethod
+    def delete_chunks_for_document(self, doc_id: str) -> None:
+        """Remove a document's chunks and FTS rows (stage-idempotent re-ingestion, NFR-5)."""
+        ...
+
+    @abstractmethod
+    def get_latest_document_by_filename(self, filename: str) -> Optional[DocumentRecord]:
+        """Return the highest-version document registered under this filename (FR-I2 versioning)."""
+        ...
+
+    @abstractmethod
+    def update_job_stage(self, job_id: str, stage: str) -> None:
+        """Record the pipeline stage an in-progress job has reached."""
+        ...
+
+    @abstractmethod
+    def retry_or_fail_job(self, job_id: str, error: str, max_attempts: int) -> bool:
+        """Return the job to 'pending' if attempts remain (True), else mark it 'failed' (False)."""
+        ...
+
+    @abstractmethod
+    def requeue_stale_jobs(self, older_than_seconds: Optional[int]) -> int:
+        """Reclaim 'in_progress' jobs (all of them when older_than_seconds is None). Returns count."""
+        ...
+
+    @abstractmethod
+    def list_documents_older_than(self, state: str, days: int) -> list[DocumentRecord]:
+        """Documents in the given state whose last update is older than N days."""
+        ...
+
+    @abstractmethod
+    def count_chunks(self) -> int:
+        """Total chunks registered across all documents."""
+        ...
+
+    @abstractmethod
+    def log_audit_event(
+        self,
+        event_type: str,
+        doc_id: Optional[str] = None,
+        details: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Persist an audit log entry."""
+        ...
+
+    @abstractmethod
+    def ping(self) -> None:
+        """Raise StorageError if the registry is not reachable (readiness probe)."""
+        ...
+
+
+    @abstractmethod
+    def replace_requirements(self, solicitation_id: str, requirements: Sequence[dict[str, Any]]) -> None:
+        """Persist the evaluated requirement records of a solicitation (FR-C1), replacing earlier ones."""
+        ...
+
+    @abstractmethod
+    def list_requirements(self, solicitation_id: str) -> list[dict[str, Any]]:
+        """Requirement records of a solicitation in extraction order."""
+        ...

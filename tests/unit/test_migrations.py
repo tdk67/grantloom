@@ -29,14 +29,16 @@ def test_migration_upgrade_and_inspection(tmp_path: Path):
         assert inspector.has_table("outbox_jobs")
         assert inspector.has_table("document_chunks")
         assert inspector.has_table("audit_logs")
+        assert inspector.has_table("structured_tables")
+        assert inspector.has_table("compliance_requirements")
         
         row = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
-        assert row == "0001_initial_registry_and_outbox"
+        assert row == "0002_structured_tables_and_requirements"
     engine.dispose()
 
     # Programmatic status inspection
     current_rev = migrator.get_current_revision(db_url=db_url)
-    assert current_rev == "0001_initial_registry_and_outbox"
+    assert current_rev == "0002_structured_tables_and_requirements"
 
     # History lists available revisions
     available = migrator.get_available_revisions()
@@ -50,7 +52,7 @@ def test_migration_downgrade(tmp_path: Path):
     db_url = f"sqlite:///{test_db.as_posix()}"
 
     migrator.upgrade(revision="head", db_url=db_url)
-    assert migrator.get_current_revision(db_url=db_url) == "0001_initial_registry_and_outbox"
+    assert migrator.get_current_revision(db_url=db_url) == "0002_structured_tables_and_requirements"
 
     # Downgrade to baseline
     migrator.downgrade(revision="0000_baseline_init", db_url=db_url)
@@ -76,7 +78,7 @@ def test_migration_cli_invocation(tmp_path: Path, capsys: pytest.CaptureFixture)
     ret = db_cli.main(["current", "--db-url", db_url])
     assert ret == 0
     captured = capsys.readouterr()
-    assert "Current database revision: 0001_initial_registry_and_outbox" in captured.out
+    assert "Current database revision: 0002_structured_tables_and_requirements" in captured.out
 
     # CLI history
     ret = db_cli.main(["history"])

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Sequence
 
 import kuzu
 
@@ -14,35 +14,65 @@ from app.ports.models import GraphEdge, GraphNode
 
 logger = logging.getLogger("grantloom.adapters.kuzu_adapter")
 
-# Predefined parameterized Cypher query templates
+# Node label -> the property holding its display text
+NODE_TEXT_PROPERTY: dict[str, str] = {
+    "Document": "filename",
+    "Requirement": "text",
+    "Person": "name",
+    "Project": "title",
+    "Funder": "name",
+}
+
+# Relationship type -> (source label, target label)
+REL_SCHEMA: dict[str, tuple[str, str]] = {
+    "REQUIRES": ("Document", "Requirement"),
+    "MENTIONS": ("Document", "Person"),
+    "MENTIONS_FUNDER": ("Document", "Funder"),
+    "DESCRIBES": ("Document", "Project"),
+    "AFFILIATED_WITH": ("Person", "Project"),
+    "FUNDS": ("Funder", "Project"),
+}
+
+# Predefined parameterized Cypher query templates (no free-form Cypher, decision O5)
 CYPHER_TEMPLATES: dict[str, str] = {
     "requirements_by_doc": (
-        "MATCH (d:Document)-[r:REQUIRES]->(req:Requirement) "
-        "WHERE d.id = $doc_id "
+        "MATCH (d:Document)-[r:REQUIRES]->(req:Requirement) WHERE d.id = $doc_id "
         "RETURN d.id AS doc_id, req.id AS req_id, req.text AS text, r.source_chunk_id AS source_chunk_id"
     ),
     "people_by_doc": (
-        "MATCH (d:Document)-[r:MENTIONS]->(p:Person) "
-        "WHERE d.id = $doc_id "
+        "MATCH (d:Document)-[r:MENTIONS]->(p:Person) WHERE d.id = $doc_id "
         "RETURN d.id AS doc_id, p.id AS person_id, p.name AS name, r.source_chunk_id AS source_chunk_id"
     ),
-    "affiliations_by_person": (
-        "MATCH (p:Person)-[r:AFFILIATED_WITH]->(prj:Project) "
-        "WHERE p.name = $person_name OR p.id = $person_id "
+    "list_people": (
+        "MATCH (d:Document)-[r:MENTIONS]->(p:Person) "
+        "RETURN p.id AS entity_id, p.name AS name, r.source_chunk_id AS source_chunk_id"
+    ),
+    "list_funders": (
+        "MATCH (d:Document)-[r:MENTIONS_FUNDER]->(f:Funder) "
+        "RETURN f.id AS entity_id, f.name AS name, r.source_chunk_id AS source_chunk_id"
+    ),
+    "list_projects": (
+        "MATCH (d:Document)-[r:DESCRIBES]->(p:Project) "
+        "RETURN p.id AS entity_id, p.title AS name, r.source_chunk_id AS source_chunk_id"
+    ),
+    "projects_by_person": (
+        "MATCH (p:Person)-[r:AFFILIATED_WITH]->(prj:Project) WHERE p.id = $entity_id "
         "RETURN p.name AS person_name, prj.title AS project_title, r.source_chunk_id AS source_chunk_id"
     ),
-    "funder_projects": (
-        "MATCH (f:Funder)-[r:FUNDS]->(prj:Project) "
-        "WHERE f.name = $funder_name OR f.id = $funder_id "
+    "people_by_project": (
+        "MATCH (p:Person)-[r:AFFILIATED_WITH]->(prj:Project) WHERE prj.id = $entity_id "
+        "RETURN p.name AS person_name, prj.title AS project_title, r.source_chunk_id AS source_chunk_id"
+    ),
+    "projects_by_funder": (
+        "MATCH (f:Funder)-[r:FUNDS]->(prj:Project) WHERE f.id = $entity_id "
         "RETURN f.name AS funder_name, prj.title AS project_title, r.source_chunk_id AS source_chunk_id"
     ),
-    "traverse_all": (
-        "MATCH (p:Person)-[r:AFFILIATED_WITH]->(prj:Project) "
-        "RETURN p.name AS person_name, prj.title AS project_title, r.source_chunk_id AS source_chunk_id"
+    "funders_by_project": (
+        "MATCH (f:Funder)-[r:FUNDS]->(prj:Project) WHERE prj.id = $entity_id "
+        "RETURN f.name AS funder_name, prj.title AS project_title, r.source_chunk_id AS source_chunk_id"
     ),
     "edge_traceability": (
-        "MATCH (a)-[r]->(b) "
-        "WHERE r.source_chunk_id = $source_chunk_id "
+        "MATCH (a)-[r]->(b) WHERE r.source_chunk_id = $source_chunk_id "
         "RETURN r.source_chunk_id AS source_chunk_id"
     ),
 }
@@ -64,65 +94,27 @@ class KuzuGraphStoreAdapter(GraphStorePort):
         self.conn = kuzu.Connection(self.db)
         self._init_schema()
 
-
     def _init_schema(self) -> None:
-        """Initialize node and relationship tables idempotently."""
-        node_schemas = [
-            "CREATE NODE TABLE IF NOT EXISTS Document(id STRING, filename STRING, PRIMARY KEY(id));",
-            "CREATE NODE TABLE IF NOT EXISTS Requirement(id STRING, text STRING, PRIMARY KEY(id));",
-            "CREATE NODE TABLE IF NOT EXISTS Person(id STRING, name STRING, PRIMARY KEY(id));",
-            "CREATE NODE TABLE IF NOT EXISTS Project(id STRING, title STRING, PRIMARY KEY(id));",
-            "CREATE NODE TABLE IF NOT EXISTS Funder(id STRING, name STRING, PRIMARY KEY(id));",
-        ]
-        rel_schemas = [
-            "CREATE REL TABLE IF NOT EXISTS REQUIRES(FROM Document TO Requirement, source_chunk_id STRING);",
-            "CREATE REL TABLE IF NOT EXISTS MENTIONS(FROM Document TO Person, source_chunk_id STRING);",
-            "CREATE REL TABLE IF NOT EXISTS AFFILIATED_WITH(FROM Person TO Project, source_chunk_id STRING);",
-            "CREATE REL TABLE IF NOT EXISTS FUNDS(FROM Funder TO Project, source_chunk_id STRING);",
-        ]
-
-        for stmt in node_schemas:
-            try:
-                self.conn.execute(stmt)
-            except Exception as exc:
-                logger.debug("Node table create notice: %s", exc)
-
-        for stmt in rel_schemas:
-            try:
-                self.conn.execute(stmt)
-            except Exception as exc:
-                logger.debug("Rel table create notice: %s", exc)
+        """Initialize node and relationship tables idempotently (IF NOT EXISTS)."""
+        for label, prop in NODE_TEXT_PROPERTY.items():
+            self.conn.execute(f"CREATE NODE TABLE IF NOT EXISTS {label}(id STRING, {prop} STRING, PRIMARY KEY(id));")
+        for rel, (src, dst) in REL_SCHEMA.items():
+            self.conn.execute(f"CREATE REL TABLE IF NOT EXISTS {rel}(FROM {src} TO {dst}, source_chunk_id STRING);")
 
     def add_nodes(self, nodes: Sequence[GraphNode]) -> None:
-        """Add graph nodes into the columnar store."""
+        """Add graph nodes into the columnar store (MERGE by id)."""
         for node in nodes:
-            label = node.label
-            props = dict(node.properties)
-            props["id"] = node.node_id
-
-            # Parameterized node insertion
-            if label == "Document":
-                filename = props.get("filename", "")
-                cypher = "MERGE (n:Document {id: $id}) ON CREATE SET n.filename = $filename;"
-                self.conn.execute(cypher, {"id": node.node_id, "filename": filename})
-            elif label == "Requirement":
-                text = props.get("text", "")
-                cypher = "MERGE (n:Requirement {id: $id}) ON CREATE SET n.text = $text;"
-                self.conn.execute(cypher, {"id": node.node_id, "text": text})
-            elif label == "Person":
-                name = props.get("name", "")
-                cypher = "MERGE (n:Person {id: $id}) ON CREATE SET n.name = $name;"
-                self.conn.execute(cypher, {"id": node.node_id, "name": name})
-            elif label == "Project":
-                title = props.get("title", "")
-                cypher = "MERGE (n:Project {id: $id}) ON CREATE SET n.title = $title;"
-                self.conn.execute(cypher, {"id": node.node_id, "title": title})
-            elif label == "Funder":
-                name = props.get("name", "")
-                cypher = "MERGE (n:Funder {id: $id}) ON CREATE SET n.name = $name;"
-                self.conn.execute(cypher, {"id": node.node_id, "name": name})
-            else:
-                logger.warning("Unrecognized node label '%s', skipped.", label)
+            prop = NODE_TEXT_PROPERTY.get(node.label)
+            if prop is None:
+                raise StorageError(f"Unsupported graph node label '{node.label}'.")
+            value = str(node.properties.get(prop, ""))
+            try:
+                self.conn.execute(
+                    f"MERGE (n:{node.label} {{id: $id}}) ON CREATE SET n.{prop} = $value;",
+                    {"id": node.node_id, "value": value},
+                )
+            except Exception as exc:
+                raise StorageError(f"Failed to merge {node.label} node '{node.node_id}': {exc}") from exc
 
     def add_edges(self, edges: Sequence[GraphEdge]) -> None:
         """Add directed edges with mandatory source chunk provenance."""
@@ -131,46 +123,20 @@ class KuzuGraphStoreAdapter(GraphStorePort):
                 raise StorageError(
                     f"GraphEdge from '{edge.source_id}' to '{edge.target_id}' missing mandatory source_chunk_id."
                 )
-
             rel_type = edge.rel_type.upper()
-            params = {
-                "source_id": edge.source_id,
-                "target_id": edge.target_id,
-                "source_chunk_id": edge.source_chunk_id,
-            }
-
-            if rel_type == "REQUIRES":
-                cypher = (
-                    "MATCH (a:Document), (b:Requirement) "
-                    "WHERE a.id = $source_id AND b.id = $target_id "
-                    "CREATE (a)-[:REQUIRES {source_chunk_id: $source_chunk_id}]->(b);"
-                )
-            elif rel_type == "MENTIONS":
-                cypher = (
-                    "MATCH (a:Document), (b:Person) "
-                    "WHERE a.id = $source_id AND b.id = $target_id "
-                    "CREATE (a)-[:MENTIONS {source_chunk_id: $source_chunk_id}]->(b);"
-                )
-            elif rel_type == "AFFILIATED_WITH":
-                cypher = (
-                    "MATCH (a:Person), (b:Project) "
-                    "WHERE a.id = $source_id AND b.id = $target_id "
-                    "CREATE (a)-[:AFFILIATED_WITH {source_chunk_id: $source_chunk_id}]->(b);"
-                )
-            elif rel_type == "FUNDS":
-                cypher = (
-                    "MATCH (a:Funder), (b:Project) "
-                    "WHERE a.id = $source_id AND b.id = $target_id "
-                    "CREATE (a)-[:FUNDS {source_chunk_id: $source_chunk_id}]->(b);"
-                )
-            else:
-                logger.warning("Unsupported relationship type '%s', skipped.", rel_type)
-                continue
-
+            if rel_type not in REL_SCHEMA:
+                raise StorageError(f"Unsupported relationship type '{rel_type}'.")
+            src, dst = REL_SCHEMA[rel_type]
+            cypher = (
+                f"MATCH (a:{src}), (b:{dst}) WHERE a.id = $source_id AND b.id = $target_id "
+                f"CREATE (a)-[:{rel_type} {{source_chunk_id: $source_chunk_id}}]->(b);"
+            )
             try:
-                self.conn.execute(cypher, params)
+                self.conn.execute(
+                    cypher,
+                    {"source_id": edge.source_id, "target_id": edge.target_id, "source_chunk_id": edge.source_chunk_id},
+                )
             except Exception as exc:
-                logger.error("Failed to insert graph edge: %s", exc)
                 raise StorageError(f"Failed to create edge {rel_type}: {exc}") from exc
 
     def query_template(self, template_id: str, params: dict[str, Any]) -> list[dict[str, Any]]:
@@ -180,43 +146,48 @@ class KuzuGraphStoreAdapter(GraphStorePort):
             raise StorageError(
                 f"Unknown Cypher template ID '{template_id}'. Allowed templates: {list(CYPHER_TEMPLATES.keys())}"
             )
-
         try:
             res = self.conn.execute(template, params)
-            results: list[dict[str, Any]] = []
             cols = res.get_column_names()
+            results: list[dict[str, Any]] = []
             while res.has_next():
-                row = res.get_next()
-                results.append(dict(zip(cols, row)))
+                results.append(dict(zip(cols, res.get_next())))
             return results
         except Exception as exc:
-            logger.error("Cypher query execution failed: %s", exc)
             raise StorageError(f"Cypher template '{template_id}' failed: {exc}") from exc
 
     def delete_document(self, doc_id: str) -> None:
-        """Purge all nodes and edges belonging to a given document ID."""
+        """Purge every edge whose provenance chunk belongs to doc_id, then orphaned nodes.
+
+        Chunk IDs are '<doc_id>:<page>:<index>', so provenance prefix matching catches edges between
+        shared entities (e.g. Person -> Project) that were extracted from this document.
+        """
+        prefix = f"{doc_id}:"
         try:
-            # Delete attached requirements and relationships
-            self.conn.execute(
-                "MATCH (d:Document)-[r:REQUIRES]->(req:Requirement) WHERE d.id = $doc_id DELETE r, req;",
-                {"doc_id": doc_id},
-            )
-            self.conn.execute(
-                "MATCH (d:Document)-[r:MENTIONS]->(p:Person) WHERE d.id = $doc_id DELETE r;",
-                {"doc_id": doc_id},
-            )
-            self.conn.execute(
-                "MATCH (d:Document) WHERE d.id = $doc_id DELETE d;",
-                {"doc_id": doc_id},
-            )
-            logger.info("Purged graph nodes and edges for doc_id '%s'.", doc_id)
+            for rel in REL_SCHEMA:
+                self.conn.execute(
+                    f"MATCH ()-[r:{rel}]->() WHERE r.source_chunk_id STARTS WITH $prefix DELETE r;",
+                    {"prefix": prefix},
+                )
+            self.conn.execute("MATCH (d:Document) WHERE d.id = $doc_id DETACH DELETE d;", {"doc_id": doc_id})
+            for label in NODE_TEXT_PROPERTY:
+                if label == "Document":
+                    continue
+                self.conn.execute(f"MATCH (n:{label}) WHERE NOT EXISTS {{ MATCH (n)-[]-() }} DELETE n;")
+            logger.info("Purged graph edges and orphaned nodes for doc_id '%s'.", doc_id)
         except Exception as exc:
-            logger.error("Failed to delete document '%s' from graph store: %s", doc_id, exc)
+            raise StorageError(f"Failed to delete document '{doc_id}' from graph store: {exc}") from exc
+
+    def ping(self) -> None:
+        try:
+            self.conn.execute("MATCH (d:Document) RETURN count(d);")
+        except Exception as exc:
+            raise StorageError(f"Graph store not reachable: {exc}") from exc
 
     def close(self) -> None:
         """Explicitly release resources for Windows file handle cleanup."""
         try:
             del self.conn
             del self.db
-        except Exception:
+        except AttributeError:
             pass

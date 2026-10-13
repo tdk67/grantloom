@@ -973,3 +973,14 @@ mark.kw-highlight {
 
 .demo-section h4 { font-size: 0.9rem; font-weight: 600; }
 .demo-section p { font-size: 0.8rem; color: var(--text-secondary); margin: 4px 0 10px; }
+
+/* Unverified-answer warning (FR-Q7) */
+.message-warning {
+  margin-top: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(239, 68, 68, 0.12);
+  color: #f87171;
+  font-size: 0.85rem;
+}
+.message-warning ul { margin: 6px 0 0 18px; }

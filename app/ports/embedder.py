@@ -18,3 +18,10 @@ class EmbedderPort(ABC):
     async def embed_batch(self, texts: Sequence[str]) -> list[list[float]]:
         """Generate dense vector embeddings for a sequence of texts."""
         ...
+
+    @property
+    @abstractmethod
+    def fingerprint(self) -> str:
+        """Identifies the embedding space (backend, model, dimension); vectors from different
+        fingerprints must never be mixed in one index."""
+        ...

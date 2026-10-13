@@ -1,65 +1,71 @@
-"""Ollama local LLM client adapter for offline inference."""
+"""Ollama local LLM client adapter for private-mode (offline) inference."""
 
 from __future__ import annotations
 
 import json
 import logging
 from typing import Any, AsyncIterator, Optional
+from urllib.parse import urlparse
 
 import httpx
 
-from app.core.errors import (
-    AuthenticationError,
-    LLMInferenceError,
-    UpstreamServiceError,
-)
+from app.core.errors import AuthenticationError, LLMInferenceError, UpstreamServiceError
 from app.ports.llm_client import LLMClientPort
 
 logger = logging.getLogger("grantloom.adapters.ollama_client")
 
+
 class OllamaClientAdapter(LLMClientPort):
-    """Client for local Ollama inference and capability verification."""
+    """Client for the local Ollama daemon. Ollama has no API keys; BYOK keys are never sent here."""
 
     def __init__(
         self,
         base_url: str,
-        default_model: str,
-        timeout: float = 180.0,
+        timeout_seconds: float,
+        probe_timeout_seconds: float,
+        log_full_prompts: bool,
     ) -> None:
         self.base_url = base_url.rstrip("/")
-        self.default_model = default_model
-        self.timeout = timeout
+        self.timeout_seconds = timeout_seconds
+        self.probe_timeout_seconds = probe_timeout_seconds
+        self.log_full_prompts = log_full_prompts
 
-    def _resolve_model(self, model: Optional[str]) -> str:
-        """Resolve model name, falling back to local default if cloud format or empty."""
-        if not model or "/" in model:
-            return self.default_model
-        return model
+    @property
+    def provider(self) -> str:
+        return "ollama"
 
-    async def validate_api_key(self, api_key: str = "") -> bool:
-        """Validate connection to local Ollama daemon via /api/tags."""
-        url = f"{self.base_url}/api/tags"
+    @property
+    def destination(self) -> str:
+        return urlparse(self.base_url).netloc or self.base_url
+
+    async def validate_api_key(self, api_key: str) -> bool:
+        """Private mode takes no BYOK key; dispatching key validation here is a wiring error."""
+        raise AuthenticationError(
+            "BYOK key validation is not applicable to the local Ollama backend (private mode)."
+        )
+
+    async def check_reachable(self) -> None:
+        """Raise UpstreamServiceError if the Ollama daemon does not answer /api/tags."""
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(url)
-                if resp.status_code != 200:
-                    raise UpstreamServiceError(f"Ollama daemon returned HTTP {resp.status_code}")
-                return True
-        except Exception as exc:
+            async with httpx.AsyncClient(timeout=self.probe_timeout_seconds) as client:
+                resp = await client.get(f"{self.base_url}/api/tags")
+        except httpx.RequestError as exc:
             raise UpstreamServiceError(f"Cannot connect to local Ollama daemon at {self.base_url}: {exc}") from exc
+        if resp.status_code != 200:
+            raise UpstreamServiceError(f"Ollama daemon returned HTTP {resp.status_code}")
 
-    async def get_available_models(self) -> list[str]:
-        """List model names available in the local Ollama instance."""
-        url = f"{self.base_url}/api/tags"
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(url)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    return [m["name"] for m in data.get("models", [])]
-                return []
-        except Exception:
-            return []
+    def _log_call(self, model: str, prompt: str, system_prompt: Optional[str]) -> None:
+        logger.info("Ollama call model=%s prompt_chars=%d", model, len(prompt) + len(system_prompt or ""))
+        if self.log_full_prompts:
+            logger.info("Ollama prompt (model=%s):\nSYSTEM: %s\nUSER: %s", model, system_prompt or "", prompt)
+
+    @staticmethod
+    def _messages(prompt: str, system_prompt: Optional[str]) -> list[dict[str, str]]:
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        return messages
 
     async def generate_response(
         self,
@@ -68,34 +74,26 @@ class OllamaClientAdapter(LLMClientPort):
         system_prompt: Optional[str] = None,
         temperature: float = 0.0,
         api_key: Optional[str] = None,
+        json_output: bool = False,
     ) -> str:
         """Generate complete response via Ollama chat API."""
-        url = f"{self.base_url}/api/chat"
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
-
-        target_model = self._resolve_model(model)
+        self._log_call(model, prompt, system_prompt)
         payload = {
-            "model": target_model,
-            "messages": messages,
+            "model": model,
+            "messages": self._messages(prompt, system_prompt),
             "stream": False,
             "options": {"temperature": temperature},
         }
-
+        if json_output:
+            payload["format"] = "json"
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                resp = await client.post(url, json=payload)
-                if resp.status_code != 200:
-                    raise LLMInferenceError(f"Ollama chat failed with HTTP {resp.status_code}: {resp.text}")
-                data = resp.json()
-                msg = data.get("message", {})
-                return msg.get("content", "")
-        except Exception as exc:
-            if isinstance(exc, LLMInferenceError):
-                raise
+            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                resp = await client.post(f"{self.base_url}/api/chat", json=payload)
+        except httpx.RequestError as exc:
             raise LLMInferenceError(f"Ollama request error: {exc}") from exc
+        if resp.status_code != 200:
+            raise LLMInferenceError(f"Ollama chat failed with HTTP {resp.status_code}: {resp.text}")
+        return resp.json().get("message", {}).get("content", "")
 
     async def stream_response(
         self,
@@ -105,72 +103,52 @@ class OllamaClientAdapter(LLMClientPort):
         temperature: float = 0.0,
         api_key: Optional[str] = None,
     ) -> AsyncIterator[str]:
-        """Stream generated tokens via Ollama chat API."""
-        url = f"{self.base_url}/api/chat"
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
-
-        target_model = self._resolve_model(model)
+        """Stream generated tokens via Ollama chat API (NDJSON)."""
+        self._log_call(model, prompt, system_prompt)
         payload = {
-            "model": target_model,
-            "messages": messages,
+            "model": model,
+            "messages": self._messages(prompt, system_prompt),
             "stream": True,
             "options": {"temperature": temperature},
         }
-
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                async with client.stream("POST", url, json=payload) as stream_resp:
+            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                async with client.stream("POST", f"{self.base_url}/api/chat", json=payload) as stream_resp:
                     if stream_resp.status_code != 200:
                         body = await stream_resp.aread()
-                        raise LLMInferenceError(f"Ollama stream failed with HTTP {stream_resp.status_code}: {body.decode()}")
-
+                        raise LLMInferenceError(
+                            f"Ollama stream failed with HTTP {stream_resp.status_code}: {body.decode(errors='replace')}"
+                        )
                     async for line in stream_resp.aiter_lines():
                         if not line.strip():
                             continue
                         try:
-                            item = json.loads(line)
-                            token = item.get("message", {}).get("content", "")
-                            if token:
-                                yield token
+                            token = json.loads(line).get("message", {}).get("content", "")
                         except json.JSONDecodeError:
                             continue
-        except Exception as exc:
-            if isinstance(exc, LLMInferenceError):
-                raise
+                        if token:
+                            yield token
+        except httpx.RequestError as exc:
             raise LLMInferenceError(f"Ollama stream error: {exc}") from exc
 
-    async def test_capabilities(self, model: str) -> dict[str, Any]:
-        """Execute a live probe to test JSON instruction following and basic tool-calling."""
-        probe_prompt = (
-            'Extract the fruit name and count from the following sentence as JSON with keys "item" and "count":\n'
-            '"Alice brought 3 apples to the lab."\n'
-            'Return ONLY the raw JSON object, no explanation.'
-        )
+    async def describe_model(self, model: str, api_key: Optional[str] = None) -> dict[str, Any]:
+        """Model facts reported by Ollama's /api/show (capabilities list and context length)."""
         try:
-            resp = await self.generate_response(
-                prompt=probe_prompt,
-                model=model,
-                temperature=0.0,
-            )
-            # Try parsing JSON from response
-            import re
-            m = re.search(r"\{.*?\}", resp, re.DOTALL)
-            parsed = json.loads(m.group(0)) if m else {}
-            has_json = parsed.get("item") == "apples" or "apples" in str(parsed)
-            return {
-                "model": model,
-                "reachable": True,
-                "json_support": has_json,
-                "raw_response": resp.strip(),
-                "status": "passed" if has_json else "partial",
-            }
-        except Exception as exc:
-            return {
-                "model": model,
-                "reachable": False,
-                "error": str(exc),
-                "status": "failed",
-            }
+            async with httpx.AsyncClient(timeout=self.probe_timeout_seconds) as client:
+                resp = await client.post(f"{self.base_url}/api/show", json={"model": model})
+        except httpx.RequestError as exc:
+            raise UpstreamServiceError(f"Cannot reach Ollama at {self.base_url}: {exc}") from exc
+        if resp.status_code == 404:
+            return {"found": False, "tool_calling": False, "context_length": None}
+        if resp.status_code != 200:
+            raise UpstreamServiceError(f"Ollama /api/show returned HTTP {resp.status_code}")
+        data = resp.json()
+        context_length = next(
+            (v for k, v in data.get("model_info", {}).items() if k.endswith(".context_length")),
+            None,
+        )
+        return {
+            "found": True,
+            "tool_calling": "tools" in (data.get("capabilities") or []),
+            "context_length": context_length,
+        }

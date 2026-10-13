@@ -9,6 +9,7 @@ Adheres to:
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -45,11 +46,65 @@ class ExtractionResult:
 
 
 
+RUNNING_LINE_MIN_PAGES = 3
+RUNNING_LINE_PAGE_SHARE = 0.5
+RUNNING_LINE_EDGE = 3
+_DIGITS_RE = re.compile(r"\d+")
+_PAGE_NUMBER_RE = re.compile(r"(?i)\bpage\b|\b\d+\s*(?:of|/)\s*\d+\b|^\W*\d+\W*$")
+
+
+def _signature(line: str) -> str:
+    """Page-number lines compare with digits masked ("Page 3 of 25"); everything else must repeat exactly."""
+    line = line.strip()
+    return _DIGITS_RE.sub("#", line) if _PAGE_NUMBER_RE.search(line) else line
+
+
+def _edge_lines(text: str) -> list[str]:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) <= 2 * RUNNING_LINE_EDGE:  # too short to have a header/footer region distinct from the body
+        return []
+    return lines[:RUNNING_LINE_EDGE] + lines[-RUNNING_LINE_EDGE:]
+
+
+def strip_running_headers(sections: list[ExtractedSection], total_pages: int) -> list[ExtractedSection]:
+    """Remove running headers/footers: lines in the top or bottom RUNNING_LINE_EDGE lines of a page
+    that (ignoring digits such as page numbers) recur on at least half of a multi-page document's
+    pages. They carry no content but would otherwise become chunks that outrank real text for any
+    query naming the document or organization. Only page-number lines are compared with digits masked.
+    Limitation: a body sentence repeated verbatim within the outer lines of most pages is also removed."""
+    if total_pages < RUNNING_LINE_MIN_PAGES:
+        return sections
+    page_lines: dict[int, set[str]] = {}
+    for sec in sections:
+        page_lines.setdefault(sec.page_number, set()).update(_signature(line) for line in _edge_lines(sec.text))
+    counts: dict[str, int] = {}
+    for lines in page_lines.values():
+        for line in lines:
+            counts[line] = counts.get(line, 0) + 1
+    running = {line for line, n in counts.items() if n >= max(RUNNING_LINE_MIN_PAGES, total_pages * RUNNING_LINE_PAGE_SHARE)}
+    if not running:
+        return sections
+    cleaned: list[ExtractedSection] = []
+    for sec in sections:
+        lines = [l for l in sec.text.splitlines() if l.strip()]
+        edge = (
+            set(range(RUNNING_LINE_EDGE)) | set(range(len(lines) - RUNNING_LINE_EDGE, len(lines)))
+            if len(lines) > 2 * RUNNING_LINE_EDGE else set()
+        )
+        kept = [l for i, l in enumerate(lines) if i not in edge or _signature(l) not in running]
+        text = "\n".join(kept).strip()
+        if text:
+            sec.text = text
+            cleaned.append(sec)
+    return cleaned
+
+
 class DocumentExtractor:
     """Multi-format document extractor."""
 
-    def __init__(self, max_pages_per_doc: int = 100) -> None:
+    def __init__(self, max_pages_per_doc: int, rows_per_chunk: int) -> None:
         self.max_pages_per_doc = max_pages_per_doc
+        self.rows_per_chunk = rows_per_chunk
 
     def extract(self, doc_id: str, file_path: str | Path, filename: str) -> ExtractionResult:
         """Dispatch extraction based on file extension."""
@@ -123,6 +178,7 @@ class DocumentExtractor:
             if plumber_doc:
                 plumber_doc.close()
 
+            sections = strip_running_headers(sections, total_pages)
             if not sections:
                 raise ExtractionError(
                     f"PDF '{filename}' contains no extractable text or tables (scanned or image-only documents are unsupported)."
@@ -225,7 +281,7 @@ class DocumentExtractor:
                     continue
 
                 # Batch data rows into chunks of 10 rows for clear tabular citations
-                batch_size = 10
+                batch_size = self.rows_per_chunk
                 for b_idx in range(0, len(data_rows), batch_size):
                     batch = data_rows[b_idx : b_idx + batch_size]
                     first_row_num = batch[0][0]
@@ -300,7 +356,7 @@ class DocumentExtractor:
             }
 
             sections: list[ExtractedSection] = []
-            batch_size = 10
+            batch_size = self.rows_per_chunk
             for b_idx in range(0, max(1, len(data_rows)), batch_size):
                 batch = data_rows[b_idx : b_idx + batch_size]
                 if not batch:

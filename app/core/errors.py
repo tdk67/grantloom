@@ -38,6 +38,9 @@ class ErrorCode(str, Enum):
     SQL_GUARD_VIOLATION = "SQL_GUARD_VIOLATION"
     RATE_LIMIT_EXCEEDED = "RATE_LIMIT_EXCEEDED"
     UPSTREAM_SERVICE_ERROR = "UPSTREAM_SERVICE_ERROR"
+    DECISION_BACKEND_ERROR = "DECISION_BACKEND_ERROR"
+    DOC_CONFLICT = "DOC_CONFLICT"
+    SERVICE_UNAVAILABLE = "SERVICE_UNAVAILABLE"
 
 
 class GrantLoomError(Exception):
@@ -192,3 +195,23 @@ class ComplianceError(GrantLoomError):
     default_title = "Compliance Matrix Failure"
     default_code = ErrorCode.VALIDATION_ERROR
 
+
+
+class ConflictError(GrantLoomError):
+    default_status = 409
+    default_title = "Conflict"
+    default_code = ErrorCode.DOC_CONFLICT
+
+
+class DecisionBackendError(GrantLoomError):
+    """Decision backend (LLM judge) failed or returned an unparseable verdict."""
+
+    default_status = 502
+    default_title = "Decision Backend Error"
+    default_code = ErrorCode.DECISION_BACKEND_ERROR
+
+
+class ServiceUnavailableError(GrantLoomError):
+    default_status = 503
+    default_title = "Service Unavailable"
+    default_code = ErrorCode.SERVICE_UNAVAILABLE

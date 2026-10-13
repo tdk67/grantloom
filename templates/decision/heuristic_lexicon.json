@@ -1,0 +1,57 @@
+{
+  "_comment": "Vocabulary for the heuristic decision backend (fallback mode). Terms are lowercase; a trailing * matches any word starting with the stem; multi-word entries match as phrases.",
+  "domain_terms": [
+    "grant*", "fund*", "solicitation*", "nofo", "foa", "rfp", "rfa", "proposal*", "award*", "budget*",
+    "cost share", "cost match*", "match*", "non-federal", "indirect", "nicra", "f&a", "salar*", "fringe benefit*",
+    "personnel", "effort", "stipend*", "travel*", "equipment", "capital equipment", "expenditure*", "allowable",
+    "eligib*", "applicant*", "apply", "prime", "recipient*", "subaward*", "subrecipient*", "subcontract*",
+    "principal investigator", "investigator*", "co-pi", "pi", "postdoc*", "graduate student*", "researcher*",
+    "lab", "labs", "laboratory", "laborator*", "facilit*", "institution*", "universit*", "department*", "organization*",
+    "agency", "agencies", "federal", "doe", "nsf", "nih", "nasa", "usda", "dod", "darpa", "foundation",
+    "complian*", "requirement*", "mandatory", "required", "regulation*", "polic*", "terms and conditions",
+    "report*", "milestone*", "deliverable*", "go/no-go", "decision point*", "period of performance",
+    "deadline*", "submission*", "submit*", "page limit*", "data management", "dmp", "public access",
+    "research", "project*", "program*", "topic area*", "objective*", "aims", "specific aims", "scope of work",
+    "cv", "curriculum vitae", "biosketch*", "publication*", "journal*", "paper*", "degree*", "ph.d.", "phd",
+    "affiliat*", "collaborat*", "partner*", "team*", "consortium", "letter of support", "commitment letter*",
+    "environmental questionnaire", "nepa", "categorical exclusion", "foreign", "export control*",
+    "contracting officer", "prior approval", "rebudget*", "no-cost extension", "audit*", "spreadsheet*", "worksheet*"
+  ],
+  "route_terms": {
+    "structured": [
+      "budget*", "salar*", "total", "sum", "how much", "how many", "price*", "cost of", "costs", "expenditure*",
+      "allocated", "budgeted", "spreadsheet*", "worksheet*", "travelers", "effort", "months of effort", "unit price",
+      "amount*", "dollar*"
+    ],
+    "graph": [
+      "who", "affiliat*", "co-investigator*", "co-pi", "collaborat*", "leads", "leading", "led by", "funded",
+      "funder*", "which agency", "relationship*", "team", "works with", "partner*"
+    ]
+  },
+  "non_name_words": [
+    "lead", "energy", "systems", "scientist", "engineer", "eligibility", "information", "biosketch", "qualifications",
+    "requirement", "requirements", "department", "office", "national", "united", "states", "program", "project",
+    "community", "health", "innovation", "solar", "grid", "investigator", "principal", "research", "laboratory",
+    "university", "institute", "center", "budget", "award", "section", "appendix", "total", "subtotal", "student",
+    "graduate", "postdoctoral", "scholar", "senior", "firmware", "equity", "policy", "facility", "notice", "tbd"
+  ],
+  "funder_keywords": ["Department", "Foundation", "Institute", "Institutes", "Agency", "Administration", "Office", "Council", "Endowment"],
+  "funding_cues": ["award", "awarded", "funded", "funding", "grant", "sponsor", "cooperative agreement"],
+  "requirement_markers": [
+    "must", "shall", "required", "requires", "require", "mandatory", "is mandated", "are mandated",
+    "may not exceed", "must not", "not to exceed", "at least", "no later than", "not eligible", "are eligible",
+    "is eligible", "ineligible", "prior approval", "prior written approval", "will not be accepted", "is limited to",
+    "are limited to", "maximum of", "minimum of"
+  ],
+  "requirement_categories": {
+    "Cost Share & Match": ["cost share", "cost match", "matching", "non-federal"],
+    "Budget & Allowable Costs": ["budget", "indirect", "nicra", "allowable", "salary", "travel", "fringe"],
+    "Equipment": ["equipment", "capital", "procurement", "vendor"],
+    "Eligibility & Key Personnel": ["eligib", "principal investigator", "pi ", "applicant", "personnel", "degree", "ffrdc"],
+    "Reporting & Milestones": ["report", "milestone", "go/no-go", "decision point", "deliverable"],
+    "Subawards & Foreign Participation": ["subaward", "subrecipient", "foreign", "flow-down", "consortium"],
+    "Data Management": ["data management", "public access", "repository", "dmp"],
+    "Submission": ["deadline", "submission", "page limit", "late", "format"],
+    "Environmental & Regulatory": ["environmental", "nepa", "export control", "human subjects", "regulation"]
+  }
+}

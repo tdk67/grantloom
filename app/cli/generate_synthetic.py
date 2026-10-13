@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 import sys
 
+from app.core.config import get_settings
 from app.synthetic.generator import SyntheticDataGenerator
 
 
@@ -15,8 +16,8 @@ def parse_args(args=None):
         "--output-dir",
         "-o",
         type=Path,
-        default=Path("data/synthetic"),
-        help="Target directory to write synthetic documents (default: data/synthetic)",
+        default=None,
+        help="Target directory to write synthetic documents (default: config database.synthetic_path)",
     )
     parser.add_argument(
         "--quiet",
@@ -29,6 +30,8 @@ def parse_args(args=None):
 
 def main():
     args = parse_args()
+    if args.output_dir is None:
+        args.output_dir = Path(get_settings().database.synthetic_path)
     print(f"=== GrantLoom Synthetic Data Generator ===")
     print(f"Destination: {args.output_dir.resolve()}")
 

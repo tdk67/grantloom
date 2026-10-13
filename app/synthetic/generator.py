@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 import json
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict
 import pypdf
 
 from app.synthetic.excel_builder import SyntheticExcelBuilder
@@ -21,8 +21,8 @@ from app.synthetic.pdf_builder import SyntheticPDFBuilder
 class SyntheticDataGenerator:
     """Generates synthetic grant solicitations, proposals, spreadsheets, and ground-truth manifests."""
 
-    def __init__(self, output_dir: Optional[Path] = None):
-        self.output_dir = output_dir or Path("data/synthetic")
+    def __init__(self, output_dir: Path):
+        self.output_dir = output_dir
         self.pdf_builder = SyntheticPDFBuilder()
         self.excel_builder = SyntheticExcelBuilder()
 

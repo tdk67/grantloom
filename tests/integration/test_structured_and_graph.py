@@ -1,270 +1,157 @@
-"""Integration tests for Milestone M3: Structured Spreadsheet & KùzuDB Graph Integration.
-
-Verifies:
-1. Query test against sample budget spreadsheet ("What is the travel total?") asserting
-   correct SQL execution, AST guard pass, and row coordinate citation.
-2. Malicious SQL test (SELECT * FROM sqlite_master; DROP TABLE ...) asserting immediate block by sql_guard.
-3. Kùzu query test verifying relationship traversal and source chunk traceability on edges.
-"""
+"""Structured spreadsheet tables + SQL guard, KùzuDB graph, and generic graph extraction."""
 
 from __future__ import annotations
 
 import gc
-import shutil
+import sqlite3
 from pathlib import Path
-from typing import Any
 
-import openpyxl
 import pytest
 
 from app.adapters.kuzu_adapter import KuzuGraphStoreAdapter
-from app.adapters.sqlite_structured_store import SqliteStructuredStoreAdapter
 from app.core.errors import SqlGuardError, StorageError
-from app.ports.models import GraphEdge, GraphNode
+from app.ports.models import DocumentChunk, GraphEdge, GraphNode
+from app.services.graph_extraction import GraphEntityExtractor
 from app.verification.sql_guard import SqlGuard
 
-
-def create_sample_budget_xlsx(file_path: Path) -> Path:
-    """Generate sample budget Excel workbook with Personnel, Travel, Equipment sheets."""
-    wb = openpyxl.Workbook()
-
-    # Sheet 1: Personnel
-    ws_personnel = wb.active
-    ws_personnel.title = "Personnel"
-    ws_personnel.append(["Role", "Name", "Effort_Months", "Salary"])
-    ws_personnel.append(["PI", "Dr. Elena Vance", 3, 45000])
-    ws_personnel.append(["Postdoc", "Alex Mercer", 12, 65000])
-    ws_personnel.append(["Grad Student", "Samira Khan", 12, 32000])
-
-    # Sheet 2: Travel
-    ws_travel = wb.create_sheet(title="Travel")
-    ws_travel.append(["Trip_Description", "Travelers", "Cost"])
-    ws_travel.append(["DOE PI Meeting (Washington DC)", 2, 2800])
-    ws_travel.append(["IEEE PVSC Conference (Austin TX)", 3, 4200])
-    ws_travel.append(["Field Testing Site Visit (Nevada)", 1, 1500])
-
-    # Sheet 3: Equipment
-    ws_equipment = wb.create_sheet(title="Equipment")
-    ws_equipment.append(["Item_Description", "Quantity", "Unit_Price", "Total_Cost"])
-    ws_equipment.append(["Solar Simulator Spectrometer", 1, 55000, 55000])
-    ws_equipment.append(["IV Characterization Station", 1, 28000, 28000])
-
-    wb.save(str(file_path))
-    return file_path
+GUARD = SqlGuard(max_rows=100, timeout_seconds=5.0)
 
 
-# ==============================================================================
-# 1. AST SQL Guard Security Tests
-# ==============================================================================
+# ------------------------------------------------------------------ SQL guard
 
-def test_sql_guard_blocks_malicious_multi_statement():
-    """Assert that multiple chained statements (e.g. injection) are immediately blocked."""
-    guard = SqlGuard()
-    malicious_sql = "SELECT * FROM sqlite_master; DROP TABLE document_registry;"
-    with pytest.raises(SqlGuardError) as exc_info:
-        guard.validate_and_sanitize(malicious_sql)
-    assert "Multiple SQL statements" in str(exc_info.value)
-
-
-def test_sql_guard_blocks_write_keywords():
-    """Assert that INSERT, UPDATE, DELETE, DROP, PRAGMA are blocked."""
-    guard = SqlGuard()
-    write_queries = [
-        "DROP TABLE users;",
-        "DELETE FROM budget WHERE amount > 0;",
-        "INSERT INTO budget VALUES (1, 'hack', 9999);",
-        "PRAGMA table_info('budget');",
-        "ALTER TABLE budget ADD COLUMN pw TEXT;",
-    ]
-    for q in write_queries:
+def test_sql_guard_blocks_multi_statement_writes_and_system_tables():
+    with pytest.raises(SqlGuardError, match="Multiple SQL statements"):
+        GUARD.validate_and_sanitize("SELECT * FROM sqlite_master; DROP TABLE documents;")
+    for q in ["DROP TABLE users;", "DELETE FROM budget WHERE amount > 0;", "PRAGMA table_info('budget');",
+              "INSERT INTO budget VALUES (1, 'hack', 9999);", "ALTER TABLE budget ADD COLUMN pw TEXT;"]:
         with pytest.raises(SqlGuardError):
-            guard.validate_and_sanitize(q)
+            GUARD.validate_and_sanitize(q)
+    for q in ["SELECT * FROM sqlite_master", "SELECT version_num FROM alembic_version",
+              "SELECT * FROM audit_logs", "SELECT text_content FROM document_chunks", "SELECT * FROM documents"]:
+        with pytest.raises(SqlGuardError):
+            GUARD.validate_and_sanitize(q)
 
 
-def test_sql_guard_blocks_system_tables():
-    """Assert access to sqlite_master, sqlite_schema, and alembic_version is blocked."""
-    guard = SqlGuard()
-    system_queries = [
-        "SELECT * FROM sqlite_master",
-        "SELECT name FROM sqlite_schema",
-        "SELECT version_num FROM alembic_version",
-    ]
-    for q in system_queries:
-        with pytest.raises(SqlGuardError) as exc_info:
-            guard.validate_and_sanitize(q)
-        assert "prohibited" in str(exc_info.value).lower() or "system table" in str(exc_info.value).lower()
+def test_sql_guard_allow_list_cannot_be_bypassed_with_quoted_identifiers():
+    with pytest.raises(SqlGuardError, match="not in the allowed tables"):
+        GUARD.validate_and_sanitize('SELECT * FROM "other_table"', allowed_tables={"doc_a_travel"})
+    with pytest.raises(SqlGuardError, match="not in the allowed tables"):
+        GUARD.validate_and_sanitize("SELECT * FROM [other_table]", allowed_tables={"doc_a_travel"})
+
+
+def test_sql_guard_authorizer_denies_reads_outside_allow_list(tmp_path: Path):
+    conn = sqlite3.connect(tmp_path / "x.db")
+    conn.execute("CREATE TABLE allowed_t (v INTEGER)")
+    conn.execute("CREATE TABLE secret_t (v INTEGER)")
+    conn.commit()
+    # A comma join hides the second table from the FROM/JOIN regex; the SQLite authorizer still refuses it.
+    with pytest.raises(SqlGuardError, match="authorization"):
+        GUARD.execute_safe(conn, "SELECT * FROM allowed_t, secret_t", allowed_tables={"allowed_t"})
+    conn.close()
 
 
 def test_sql_guard_enforces_limit_cap():
-    """Assert that queries without LIMIT get LIMIT 100 and LIMIT > 100 is capped."""
-    guard = SqlGuard(max_rows=100)
-    # Query with no limit
-    sanitized1 = guard.validate_and_sanitize("SELECT * FROM doc_123_travel")
-    assert "LIMIT 100" in sanitized1
-
-    # Query with excessive limit
-    sanitized2 = guard.validate_and_sanitize("SELECT * FROM doc_123_travel LIMIT 5000")
-    assert "LIMIT 100" in sanitized2
-    assert "5000" not in sanitized2
-
-    # Query with valid lower limit is preserved
-    sanitized3 = guard.validate_and_sanitize("SELECT * FROM doc_123_travel LIMIT 10")
-    assert "LIMIT 10" in sanitized3
+    assert "LIMIT 100" in GUARD.validate_and_sanitize("SELECT * FROM doc_123_travel")
+    capped = GUARD.validate_and_sanitize("SELECT * FROM doc_123_travel LIMIT 5000")
+    assert "LIMIT 100" in capped and "5000" not in capped
+    assert "LIMIT 10" in GUARD.validate_and_sanitize("SELECT * FROM doc_123_travel LIMIT 10")
 
 
-# ==============================================================================
-# 2. Structured Tabular Spreadsheet Ingestion and Query Tests
-# ==============================================================================
+# ------------------------------------------------------------------ structured store
 
-def test_structured_store_ingestion_and_travel_total_query(tmp_path: Path):
-    """Query test against sample budget spreadsheet ('What is the travel total?').
-
-    Asserts:
-    - Tables created in SQLite preserving row_number and data types
-    - Correct SQL execution via SqlGuard
-    - Travel total calculation matches ($8,500)
-    - Row coordinate citations are preserved
-    """
-    db_path = tmp_path / "structured_test.db"
-    store = SqliteStructuredStoreAdapter(str(db_path))
-
-    # Sample Travel rows (row_number, [Trip_Description, Travelers, Cost])
-    travel_columns = ["Trip_Description", "Travelers", "Cost"]
-    travel_rows = [
+def test_structured_store_load_query_and_purge(stack):
+    store = stack.structured_store
+    table = store.load_sheet("doc_abc", "Travel", ["Trip_Description", "Travelers", "Cost"], [
         (2, ["DOE PI Meeting (Washington DC)", 2, 2800]),
         (3, ["IEEE PVSC Conference (Austin TX)", 3, 4200]),
         (4, ["Field Testing Site Visit (Nevada)", 1, 1500]),
-    ]
-    store.load_sheet("doc_doe2026_travel", travel_columns, travel_rows)
+    ])
+    info = store.list_tables(["doc_abc"])[0]
+    assert (info.table_name, info.doc_id, info.sheet_name, info.row_count) == (table, "doc_abc", "Travel", 3)
+    assert {"row_number", "trip_description", "cost"} <= {c["name"] for c in info.columns}
 
-    # Verify table schema
-    schema = store.get_table_schema("doc_doe2026_travel")
-    col_names = [col["name"] for col in schema]
-    assert "row_number" in col_names
-    assert "trip_description" in col_names
-    assert "cost" in col_names
+    assert store.execute_query(f'SELECT SUM(cost) AS total FROM "{table}"')[0]["total"] == 8500
+    rows = store.execute_query(f'SELECT row_number, cost FROM "{table}" ORDER BY row_number')
+    assert [r["row_number"] for r in rows] == [2, 3, 4]
 
-    # Run guarded SQL query computing travel total
-    query = "SELECT SUM(cost) AS travel_total FROM doc_doe2026_travel;"
-    results = store.execute_query(query)
-    assert len(results) == 1
-    assert results[0]["travel_total"] == 8500  # 2800 + 4200 + 1500
-
-    # Query individual rows and check row coordinate preservation
-    detail_query = "SELECT row_number, trip_description, cost FROM doc_doe2026_travel ORDER BY row_number;"
-    details = store.execute_query(detail_query)
-    assert len(details) == 3
-    assert details[0]["row_number"] == 2
-    assert details[0]["trip_description"] == "DOE PI Meeting (Washington DC)"
-    assert details[0]["cost"] == 2800
-
-    assert details[1]["row_number"] == 3
-    assert details[2]["row_number"] == 4
-
-    # Test delete_document_tables
-    store.delete_document_tables("doe2026")
+    # Only registered spreadsheet tables are queryable, never registry tables
     with pytest.raises(SqlGuardError):
-        store.execute_query("SELECT * FROM doc_doe2026_travel;")
+        store.execute_query("SELECT * FROM structured_tables")
+
+    store.delete_document_tables("doc_abc")
+    assert store.list_tables(["doc_abc"]) == []
+    with pytest.raises(SqlGuardError):
+        store.execute_query(f'SELECT * FROM "{table}"')
 
 
-# ==============================================================================
-# 3. KùzuDB Columnar Graph Store & Provenance Traceability Tests
-# ==============================================================================
+# ------------------------------------------------------------------ KùzuDB
 
-def test_kuzudb_graph_integration_and_provenance_traceability(tmp_path: Path):
-    """Kùzu query test verifying relationship traversal and source chunk traceability on edges."""
-    kuzu_dir = tmp_path / "kuzudb_test"
-    graph_store = KuzuGraphStoreAdapter(str(kuzu_dir))
-
+def test_kuzudb_templates_provenance_and_document_purge(tmp_path: Path):
+    graph = KuzuGraphStoreAdapter(str(tmp_path / "kuzu"))
     try:
-        # 1. Add nodes: Document, Requirement, Person, Project, Funder
-        nodes = [
-            GraphNode(node_id="doc_solar_2026", label="Document", properties={"filename": "DOE_Solar_2026.pdf"}),
-            GraphNode(node_id="req_cost_match", label="Requirement", properties={"text": "Mandatory 20% non-federal cost match"}),
-            GraphNode(node_id="person_elena", label="Person", properties={"name": "Dr. Elena Vance"}),
-            GraphNode(node_id="proj_pv_tech", label="Project", properties={"title": "Perovskite Photovoltaic Research"}),
-            GraphNode(node_id="funder_doe", label="Funder", properties={"name": "Department of Energy"}),
-        ]
-        graph_store.add_nodes(nodes)
-
-        # 2. Add edges with mandatory source_chunk_id
-        edges = [
-            GraphEdge(
-                source_id="doc_solar_2026",
-                target_id="req_cost_match",
-                rel_type="REQUIRES",
-                source_chunk_id="doc_solar_2026:1:3",
-            ),
-            GraphEdge(
-                source_id="doc_solar_2026",
-                target_id="person_elena",
-                rel_type="MENTIONS",
-                source_chunk_id="doc_solar_2026:2:1",
-            ),
-            GraphEdge(
-                source_id="person_elena",
-                target_id="proj_pv_tech",
-                rel_type="AFFILIATED_WITH",
-                source_chunk_id="past_prop_2024:3:2",
-            ),
-            GraphEdge(
-                source_id="funder_doe",
-                target_id="proj_pv_tech",
-                rel_type="FUNDS",
-                source_chunk_id="past_prop_2024:1:1",
-            ),
-        ]
-        graph_store.add_edges(edges)
-
-        # 3. Verify Edge without source_chunk_id is rejected
+        graph.add_nodes([
+            GraphNode("doc_a", "Document", {"filename": "a.pdf"}),
+            GraphNode("doc_b", "Document", {"filename": "b.pdf"}),
+            GraphNode("person_x", "Person", {"name": "Dr. Jane Roe"}),
+            GraphNode("proj_p", "Project", {"title": "Coastal Sensor Network"}),
+            GraphNode("funder_nsf", "Funder", {"name": "National Science Foundation (NSF)"}),
+        ])
+        graph.add_edges([
+            GraphEdge("doc_a", "person_x", "MENTIONS", "doc_a:1:0"),
+            GraphEdge("doc_a", "proj_p", "DESCRIBES", "doc_a:1:0"),
+            GraphEdge("person_x", "proj_p", "AFFILIATED_WITH", "doc_a:1:1"),
+            GraphEdge("funder_nsf", "proj_p", "FUNDS", "doc_a:2:0"),
+            GraphEdge("doc_b", "person_x", "MENTIONS", "doc_b:1:0"),
+        ])
         with pytest.raises(StorageError):
-            graph_store.add_edges([
-                GraphEdge(
-                    source_id="doc_solar_2026",
-                    target_id="person_elena",
-                    rel_type="MENTIONS",
-                    source_chunk_id="",  # Missing provenance!
-                )
-            ])
+            graph.add_edges([GraphEdge("doc_a", "person_x", "MENTIONS", "")])
 
-        # 4. Query template: requirements_by_doc
-        req_res = graph_store.query_template("requirements_by_doc", {"doc_id": "doc_solar_2026"})
-        assert len(req_res) == 1
-        assert req_res[0]["doc_id"] == "doc_solar_2026"
-        assert req_res[0]["req_id"] == "req_cost_match"
-        assert req_res[0]["source_chunk_id"] == "doc_solar_2026:1:3"
+        assert graph.query_template("people_by_project", {"entity_id": "proj_p"})[0]["source_chunk_id"] == "doc_a:1:1"
+        assert graph.query_template("projects_by_funder", {"entity_id": "funder_nsf"})[0]["project_title"] == "Coastal Sensor Network"
+        with pytest.raises(StorageError):
+            graph.query_template("free_form", {})
 
-        # 5. Query template: affiliations_by_person
-        affil_res = graph_store.query_template("affiliations_by_person", {
-            "person_name": "Dr. Elena Vance",
-            "person_id": "person_elena",
-        })
-        assert len(affil_res) == 1
-        assert affil_res[0]["person_name"] == "Dr. Elena Vance"
-        assert affil_res[0]["project_title"] == "Perovskite Photovoltaic Research"
-        assert affil_res[0]["source_chunk_id"] == "past_prop_2024:3:2"
-
-        # 6. Query template: funder_projects
-        funder_res = graph_store.query_template("funder_projects", {
-            "funder_name": "Department of Energy",
-            "funder_id": "funder_doe",
-        })
-        assert len(funder_res) == 1
-        assert funder_res[0]["funder_name"] == "Department of Energy"
-        assert funder_res[0]["project_title"] == "Perovskite Photovoltaic Research"
-        assert funder_res[0]["source_chunk_id"] == "past_prop_2024:1:1"
-
-        # 7. Query template: traverse_all
-        all_affils = graph_store.query_template("traverse_all", {})
-        assert len(all_affils) >= 1
-        assert all_affils[0]["source_chunk_id"] == "past_prop_2024:3:2"
-
-        # 8. Query template: edge_traceability
-        trace_res = graph_store.query_template("edge_traceability", {"source_chunk_id": "doc_solar_2026:1:3"})
-        assert len(trace_res) == 1
-        assert trace_res[0]["source_chunk_id"] == "doc_solar_2026:1:3"
-
+        # Deleting doc_a removes every edge extracted from it, including entity-to-entity edges,
+        # while the person still mentioned by doc_b survives.
+        graph.delete_document("doc_a")
+        assert graph.query_template("people_by_project", {"entity_id": "proj_p"}) == []
+        assert graph.query_template("projects_by_funder", {"entity_id": "funder_nsf"}) == []
+        assert [r["entity_id"] for r in graph.query_template("list_people", {})] == ["person_x"]
+        assert graph.query_template("list_projects", {}) == []
     finally:
-        # Ensure Windows handles are freed before directory cleanup
-        graph_store.close()
+        graph.close()
         gc.collect()
+
+
+# ------------------------------------------------------------------ generic graph extraction
+
+def _chunks(doc_id: str, texts: list[str]) -> list[DocumentChunk]:
+    return [DocumentChunk(chunk_id=f"{doc_id}:1:{i}", doc_id=doc_id, chunk_index=i, text_content=t) for i, t in enumerate(texts)]
+
+
+def test_graph_extraction_is_generic_and_provenance_tracked():
+    """Entities never seen in the synthetic corpus are extracted from their textual cues."""
+    chunks = _chunks("doc_p", [
+        "Project Title: Arctic Permafrost Carbon Flux Observatory\nPrincipal Investigator: Dr. Ingrid Solberg, Senior Scientist",
+        "Funded by the National Science Foundation (NSF) under a cooperative agreement award.",
+        "Tomas Rivera, M.S. — Field Engineer (50% effort)\nThe PI must submit annual reports to the program officer.",
+    ])
+    nodes, edges = GraphEntityExtractor().extract("doc_p", "p.pdf", chunks, known_funders={})
+    by_label: dict[str, set[str]] = {}
+    for n in nodes:
+        by_label.setdefault(n.label, set()).add(next(iter(n.properties.values())))
+    assert by_label["Person"] == {"Dr. Ingrid Solberg", "Tomas Rivera"}
+    assert by_label["Project"] == {"Arctic Permafrost Carbon Flux Observatory"}
+    assert by_label["Funder"] == {"National Science Foundation (NSF)"}
+    assert any("must submit annual reports" in t for t in by_label["Requirement"])
+
+    affiliations = {(e.source_id, e.source_chunk_id) for e in edges if e.rel_type == "AFFILIATED_WITH"}
+    assert ("person_ingrid_solberg", "doc_p:1:0") in affiliations
+    assert any(e.rel_type == "FUNDS" and e.source_chunk_id == "doc_p:1:1" for e in edges)
+    assert all(e.source_chunk_id.startswith("doc_p:") for e in edges)
+
+
+def test_graph_extraction_ignores_capitalized_non_names():
+    chunks = _chunks("doc_q", ["Principal Investigator Eligibility Information is described in Section 3."])
+    nodes, _ = GraphEntityExtractor().extract("doc_q", "q.pdf", chunks, known_funders={})
+    assert [n for n in nodes if n.label == "Person"] == []

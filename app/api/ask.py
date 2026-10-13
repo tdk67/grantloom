@@ -10,55 +10,36 @@ from fastapi import APIRouter, Body, Depends, Header, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.api.deps import get_ask_service, get_llm_client
-from app.core.config import Settings, get_settings
-from app.core.errors import AuthenticationError, BadRequestError
-from app.ports.llm_client import LLMClientPort
+from app.api.deps import get_ask_service, get_inference_profile, verify_master_api_key
+from app.core.rate_limit import ask_limit, limiter
 from app.services.ask_service import AskService
+from app.services.inference import InferenceProfile
 
 logger = logging.getLogger("grantloom.api.ask")
 
-router = APIRouter(prefix="/api/v1", tags=["query"])
+router = APIRouter(prefix="/api/v1", tags=["query"], dependencies=[Depends(verify_master_api_key)])
 
 
 class AskRequest(BaseModel):
-    query: str = Field(..., min_length=1, max_length=2000, description="User question to answer")
+    query: str = Field(..., min_length=1, description="User question (length limit enforced by G1 from config)")
 
 
 @router.post("/ask", status_code=status.HTTP_200_OK)
+@limiter.limit(ask_limit)
 async def ask_endpoint(
+    request: Request,
     req: AskRequest = Body(..., embed=False),
     x_openrouter_key: Optional[str] = Header(None, alias="X-OpenRouter-Key"),
-    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
-    settings: Settings = Depends(get_settings),
-    llm_client: LLMClientPort = Depends(get_llm_client),
+    profile: InferenceProfile = Depends(get_inference_profile),
     ask_service: AskService = Depends(get_ask_service),
 ) -> StreamingResponse:
     """Stream answer generation with real-time SSE event pipeline."""
-    # 1. Master API key verification (if configured in settings)
-    master_key = settings.secrets.master_api_key
-    if master_key and x_api_key != master_key:
-        raise AuthenticationError("Invalid master X-API-Key.")
-
-    # 2. BYOK OpenRouter Key Validation (FR-Q1)
-    # If not private mode, validate X-OpenRouter-Key live against auth probe
-    if not settings.llm.private_mode:
-        if not x_openrouter_key:
-            raise AuthenticationError("Header 'X-OpenRouter-Key' is required for query inference.")
-        # Perform live auth probe against upstream provider
-        await llm_client.validate_api_key(x_openrouter_key)
+    # FR-Q1: in BYOK mode the key is mandatory and probed live against OpenRouter before any work.
+    api_key = await profile.authorize(x_openrouter_key)
 
     async def sse_event_stream() -> AsyncIterator[str]:
-        try:
-            async for event_type, data in ask_service.stream_ask(
-                query=req.query,
-                api_key=x_openrouter_key,
-            ):
-                yield f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
-        except Exception as exc:
-            logger.error("SSE stream encountered unhandled error: %s", exc)
-            err_payload = json.dumps({"error": str(exc), "status": 500})
-            yield f"event: error\ndata: {err_payload}\n\n"
+        async for event_type, data in ask_service.stream_ask(query=req.query, api_key=api_key):
+            yield f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
 
     return StreamingResponse(
         sse_event_stream(),

@@ -9,9 +9,21 @@ from typing import Any, AsyncIterator, Optional
 class LLMClientPort(ABC):
     """Abstract port for BYOK OpenRouter and local Ollama inference."""
 
+    @property
+    @abstractmethod
+    def provider(self) -> str:
+        """Provider identifier ('openrouter', 'ollama', or a test double name)."""
+        ...
+
+    @property
+    @abstractmethod
+    def destination(self) -> str:
+        """Host that prompts are sent to (shown to users as the data-egress destination, FR-Q10)."""
+        ...
+
     @abstractmethod
     async def validate_api_key(self, api_key: str) -> bool:
-        """Validate API key against provider upstream auth probe."""
+        """Validate a BYOK key against the provider's auth probe (raises on invalid / exhausted keys)."""
         ...
 
     @abstractmethod
@@ -22,8 +34,9 @@ class LLMClientPort(ABC):
         system_prompt: Optional[str] = None,
         temperature: float = 0.0,
         api_key: Optional[str] = None,
+        json_output: bool = False,
     ) -> str:
-        """Execute a single-turn completion."""
+        """Execute a single-turn completion (json_output=True asks the provider for a JSON object)."""
         ...
 
     @abstractmethod
@@ -36,4 +49,9 @@ class LLMClientPort(ABC):
         api_key: Optional[str] = None,
     ) -> AsyncIterator[str]:
         """Stream generated tokens over an async iterator."""
+        ...
+
+    @abstractmethod
+    async def describe_model(self, model: str, api_key: Optional[str] = None) -> dict[str, Any]:
+        """Provider-reported model facts: {'found', 'tool_calling', 'context_length'}."""
         ...

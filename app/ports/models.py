@@ -124,3 +124,46 @@ class AskResponse:
     abstention: bool = False
     strategy: str = "hybrid"
 
+
+
+@dataclass
+class ChunkJudgement:
+    """G3 per-chunk verdict: relevance choice, injection probability, usefulness score (0-100)."""
+
+    chunk_id: str
+    relevance: str  # answers, partial, irrelevant
+    injection_probability: float
+    usefulness: float
+    backend: str = ""
+
+
+@dataclass
+class ClaimJudgement:
+    """G4 per-claim verdict against the evidence the claim cites."""
+
+    claim: str
+    cited_chunk_ids: list[str]
+    verdict: str  # grounded, unsupported, contradicted
+    reason: str = ""
+    backend: str = ""
+
+
+@dataclass
+class RequirementAssessment:
+    """Compliance verdict for one solicitation requirement against lab evidence."""
+
+    status: str  # Satisfied, Partial, Gap
+    evidence_chunk_id: Optional[str]
+    rationale: str
+    backend: str = ""
+
+
+@dataclass
+class ScanReport:
+    """Ingestion injection scan result (FR-I5), counted per chunk."""
+
+    quarantined: bool
+    tainted_chunk_ids: list[str]
+    tier1_flagged_chunk_ids: list[str]
+    tier2_status: str  # completed, skipped:<reason>, failed:<reason>
+    reasons: list[str] = field(default_factory=list)

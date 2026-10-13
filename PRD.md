@@ -309,6 +309,8 @@ To fulfill the capstone requirements for **agent-based planning, tool retrieval,
 | **G3** | **Context Filter** | Candidate chunks | Scores chunk relevance; screens for injected text strings; truncates context. | Ranks top K chunks for writer prompt. | Drops irrelevant or flagged chunk blocks. | Cosine similarity + heuristic filter |
 | **G4** | **Output Verifier** | Writer draft & chunk IDs | Resolves chunk IDs against registry; checks claim faithfulness and grounding. | Emits verified answer with citation badges. | Initiates bounded rewrite loop (max 2 attempts). | Registry resolver + `PromptJudgeAdapter` |
 
+> **Implementation status (2026-10-13, decisions-log D22):** `PromptJudgeAdapter` is implemented as `LLMJudgeDecisionBackend` and is the default for G1 (after the regex prefilter), G2, G3 and G4, with a labelled heuristic fallback (`HeuristicDecisionBackend`; cosine/lexical rules as listed for G3). Every gate verdict reports the backend that produced it. Jev and Julia-1 backends from `data-strategy.md` Part 3 are **deferred** and not implemented.
+
 ### 8.4 API Surface Specification
 
 | Method | Endpoint | Auth Headers | Request Payload | Success Response | Error Codes | FR Ref |

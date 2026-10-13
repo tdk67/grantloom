@@ -1,30 +1,44 @@
-"""Multi-step agent reasoning loop (PlannerAgent -> RetrieverAgent -> WriterAgent -> ValidatorAgent).
+"""Multi-step agent reasoning loop — the single query pipeline behind /api/v1/ask and the eval runner.
 
-Implements Capstone Task 8 multi-step agent architecture:
-- PlannerAgent: Formulates structured retrieval and verification strategy.
-- RetrieverAgent: Invocates discrete tools (dense_vector_search, bm25_keyword_search, sql_tabular_query).
-- WriterAgent: Synthesizes draft answer grounded strictly in retrieved context.
-- ValidatorAgent: Resolves citations to physical coordinates, measures faithfulness, triggers bounded rewrite.
+PlannerAgent    G1 input guard + G2 router; selects discrete tools.
+RetrieverAgent  dense_vector_search + bm25_keyword_search (+ sql_tabular_query / graph_traverse_query),
+                then the G3 context filter.
+WriterAgent     drafts an answer citing [chunk_id] markers (streamed).
+ValidatorAgent  G4: resolves citations, verifies each claim, and drives the bounded rewrite loop
+                with a diagnostic payload (FR-A3, FR-Q7).
+
+`AgentLoopOrchestrator.stream()` yields SSE events; `run()` consumes the same stream, so the API and
+the evaluation exercise identical code.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Optional, Sequence
+from typing import Any, AsyncIterator, Optional, Sequence
 
 from app.core.config import Settings
-from app.ports.embedder import EmbedderPort
-from app.ports.graph_store import GraphStorePort
+from app.core.errors import GrantLoomError
+from app.core.metrics import REWRITES
+from app.core.templates import load_template, render_template
 from app.ports.llm_client import LLMClientPort
-from app.ports.models import AskResponse, CitationCoordinate, DocumentChunk
+from app.ports.models import CitationCoordinate, DocumentChunk
 from app.ports.registry import RegistryPort
-from app.ports.structured_store import StructuredStorePort
-from app.ports.vector_store import VectorStorePort
-from app.services.guardrails import InputGuard, OutputGuard, StrategyRouter
-from app.services.retrieval_service import ABSTENTION_MESSAGE, HybridRetrievalService
+from app.services.guardrails import (
+    STRATEGIES,
+    ContextFilter,
+    InputGuard,
+    OutputGuard,
+    StrategyRouter,
+    VerificationResult,
+    gate_event,
+)
+from app.services.retrieval_service import ABSTENTION_MESSAGE, HybridRetrievalService, RetrievalResult
+from app.services.retriever_tools import GraphQueryTool, StructuredQueryTool, ToolOutcome
 
 logger = logging.getLogger("grantloom.services.agent_loop")
+
+UNVERIFIED_WARNING = "Some statements could not be verified against the cited sources after the maximum number of rewrites."
 
 
 @dataclass
@@ -32,6 +46,7 @@ class AgentToolExecution:
     tool_name: str
     arguments: dict[str, Any]
     result_count: int
+    status: str = "ok"
     duration_ms: float = 0.0
 
 
@@ -40,12 +55,11 @@ class AgentPlan:
     intent: str
     strategy: str
     selected_tools: list[str]
-    max_rewrites: int = 2
 
 
 @dataclass
 class AgentRunResult:
-    plan: AgentPlan
+    plan: Optional[AgentPlan]
     tool_executions: list[AgentToolExecution]
     final_answer: str
     citations: list[CitationCoordinate]
@@ -54,248 +68,198 @@ class AgentRunResult:
     resolvability: float
     abstention: bool = False
     blocked: bool = False
+    refusal_reason: str = ""
+    verified: bool = False
+    unverified_claims: list[str] = field(default_factory=list)
+    attempts: int = 0
+    context_texts: list[str] = field(default_factory=list)
+    events: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+
+
+@dataclass
+class RetrievalOutcome:
+    chunks: list[DocumentChunk]
+    tool_evidence: list[str]
+    tool_executions: list[AgentToolExecution]
+    retrieval: RetrievalResult
+    dropped: list[dict[str, str]]
+    filter_backend: str
+
+    @property
+    def abstention(self) -> bool:
+        return not self.chunks
+
+
+def citation_dict(c: CitationCoordinate) -> dict[str, Any]:
+    return {
+        "chunk_id": c.chunk_id,
+        "doc_id": c.doc_id,
+        "filename": c.filename,
+        "page": c.page,
+        "line": c.line,
+        "sheet": c.sheet,
+        "row": c.row,
+        "excerpt": c.excerpt,
+        "verified": c.verified,
+    }
 
 
 class PlannerAgent:
-    """Classifies user intent and outlines discrete tool invocations."""
+    """G1 + G2, then selects the discrete tools for the chosen strategy."""
 
-    def __init__(self, input_guard: InputGuard, strategy_router: StrategyRouter) -> None:
+    def __init__(
+        self,
+        input_guard: InputGuard,
+        strategy_router: StrategyRouter,
+        structured_tool: Optional[StructuredQueryTool] = None,
+        graph_tool: Optional[GraphQueryTool] = None,
+        semantic_embeddings: bool = False,
+    ) -> None:
         self.input_guard = input_guard
         self.strategy_router = strategy_router
+        self.structured_tool = structured_tool
+        self.graph_tool = graph_tool
+        self.semantic_embeddings = semantic_embeddings
 
-    def plan(self, query: str) -> tuple[AgentPlan, bool, str]:
-        # Step 1: Input Guardrail
-        g1 = self.input_guard.evaluate(query)
-        if not g1.passed:
-            refusal = g1.metadata.get("refusal", "Query blocked by security guardrails.")
-            return AgentPlan(intent="blocked", strategy="refusal", selected_tools=[]), True, refusal
+    def available_strategies(self) -> list[str]:
+        # Dense-only "semantic" retrieval is offered only when the embedder is actually semantic.
+        available = ["hybrid", "keyword"] + (["semantic"] if self.semantic_embeddings else [])
+        if self.structured_tool is not None and self.structured_tool.available():
+            available.append("structured")
+        if self.graph_tool is not None:
+            available.append("graph")
+        return [s for s in STRATEGIES if s in available]
 
-        # Step 2: Strategy Router
-        g2 = self.strategy_router.evaluate(query)
-        strategy = g2.metadata.get("strategy", "hybrid")
-
+    def tools_for(self, strategy: str) -> list[str]:
         tools = []
+        if strategy in ("hybrid", "semantic", "structured", "graph"):
+            tools.append("dense_vector_search")
+        if strategy in ("hybrid", "keyword", "structured", "graph"):
+            tools.append("bm25_keyword_search")
         if strategy == "structured":
-            tools = ["sql_tabular_query", "bm25_keyword_search"]
-        elif strategy == "graph":
-            tools = ["graph_template_query", "dense_vector_search"]
-        else:
-            tools = ["dense_vector_search", "bm25_keyword_search"]
-
-        plan = AgentPlan(
-            intent=g2.reason,
-            strategy=strategy,
-            selected_tools=tools,
-        )
-        return plan, False, query
+            tools.append("sql_tabular_query")
+        if strategy == "graph":
+            tools.append("graph_traverse_query")
+        return tools
 
 
 class RetrieverAgent:
-    """Executes discrete tools and captures tool invocation logs."""
+    """Executes the planned tools, then applies the G3 context filter."""
 
     def __init__(
         self,
         retrieval_service: HybridRetrievalService,
-        structured_store: Optional[StructuredStorePort] = None,
-        graph_store: Optional[GraphStorePort] = None,
+        context_filter: ContextFilter,
+        structured_tool: Optional[StructuredQueryTool] = None,
+        graph_tool: Optional[GraphQueryTool] = None,
     ) -> None:
         self.retrieval_service = retrieval_service
-        self.structured_store = structured_store
-        self.graph_store = graph_store
+        self.context_filter = context_filter
+        self.structured_tool = structured_tool
+        self.graph_tool = graph_tool
 
-    async def execute_tools(
-        self,
-        query: str,
-        plan: AgentPlan,
-    ) -> tuple[list[DocumentChunk], list[AgentToolExecution], bool]:
-        tool_logs: list[AgentToolExecution] = []
-
-        # Discrete tool execution: dense_vector_search
+    async def execute(self, query: str, plan: AgentPlan, api_key: Optional[str] = None) -> RetrievalOutcome:
+        cfg = self.retrieval_service.settings.retrieval
+        retrieval = await self.retrieval_service.retrieve(query=query, strategy=plan.strategy)
+        executions: list[AgentToolExecution] = []
+        errors = {e.split(":", 1)[0]: e for e in retrieval.errors}
         if "dense_vector_search" in plan.selected_tools:
-            k = self.retrieval_service.settings.retrieval.dense_top_k
-            tool_logs.append(AgentToolExecution(
-                tool_name="dense_vector_search",
-                arguments={"query": query, "top_k": k},
-                result_count=k,
+            executions.append(AgentToolExecution(
+                "dense_vector_search", {"query": query, "top_k": cfg.dense_top_k}, retrieval.dense_count,
+                f"error: {errors['dense_vector_search']}" if "dense_vector_search" in errors else "ok", retrieval.dense_ms,
             ))
-
-        # Discrete tool execution: bm25_keyword_search
         if "bm25_keyword_search" in plan.selected_tools:
-            k = self.retrieval_service.settings.retrieval.bm25_top_k
-            tool_logs.append(AgentToolExecution(
-                tool_name="bm25_keyword_search",
-                arguments={"query": query, "top_k": k},
-                result_count=k,
+            executions.append(AgentToolExecution(
+                "bm25_keyword_search", {"query": query, "top_k": cfg.bm25_top_k}, retrieval.bm25_count,
+                f"error: {errors['bm25_keyword_search']}" if "bm25_keyword_search" in errors else "ok", retrieval.bm25_ms,
             ))
 
-        # Discrete tool execution: sql_tabular_query
-        if "sql_tabular_query" in plan.selected_tools:
-            sql_rows_count = 0
-            if self.structured_store:
-                try:
-                    conn = self.structured_store._get_connection()
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'doc_%'")
-                    tables = [row[0] for row in cursor.fetchall()]
-                    conn.close()
+        outcomes: list[ToolOutcome] = []
+        if "sql_tabular_query" in plan.selected_tools and self.structured_tool is not None:
+            outcomes.append(await self.structured_tool.run(query, api_key))
+        if "graph_traverse_query" in plan.selected_tools and self.graph_tool is not None:
+            outcomes.append(self.graph_tool.run(query))
+        for o in outcomes:
+            executions.append(AgentToolExecution(o.tool_name, o.arguments, o.result_count, o.status, o.duration_ms))
 
-                    for tbl in tables[:3]:
-                        res = self.structured_store.execute_query(f'SELECT * FROM "{tbl}" LIMIT 10;')
-                        sql_rows_count += len(res)
-                except Exception as s_err:
-                    logger.debug("Structured query notice: %s", s_err)
-
-            tool_logs.append(AgentToolExecution(
-                tool_name="sql_tabular_query",
-                arguments={"query": query, "ast_guard": True},
-                result_count=sql_rows_count,
-            ))
-
-        # Discrete tool execution: graph_template_query
-        if "graph_template_query" in plan.selected_tools:
-            graph_rows_count = 0
-            if self.graph_store:
-                try:
-                    g_res = self.graph_store.query_template("traverse_all", {})
-                    graph_rows_count = len(g_res)
-                except Exception as g_err:
-                    logger.debug("Graph traverse notice: %s", g_err)
-
-            tool_logs.append(AgentToolExecution(
-                tool_name="graph_template_query",
-                arguments={"query": query, "template": "traverse_all"},
-                result_count=graph_rows_count,
-            ))
-
-        chunks, max_relevance, is_abstention = await self.retrieval_service.retrieve(
-            query=query,
-            strategy=plan.strategy,
+        filtered = await self.context_filter.filter(query, retrieval.chunks, retrieval.dense_scores, api_key)
+        tool_chunks, tool_dropped = self.context_filter.screen_tool_evidence(
+            [c for o in outcomes for c in o.evidence_chunks]
         )
-
-        return chunks, tool_logs, is_abstention
+        merged: dict[str, DocumentChunk] = {}
+        for c in [*tool_chunks, *filtered.chunks]:
+            merged.setdefault(c.chunk_id, c)
+        tool_evidence = [t for o in outcomes for t in o.evidence_text] if tool_chunks else []
+        return RetrievalOutcome(
+            chunks=list(merged.values()),
+            tool_evidence=tool_evidence,
+            tool_executions=executions,
+            retrieval=retrieval,
+            dropped=filtered.dropped + tool_dropped,
+            filter_backend=filtered.backend,
+        )
 
 
 class WriterAgent:
-    """Synthesizes draft response citing bracketed chunk markers."""
+    """Drafts an answer grounded in the context, citing [chunk_id] markers."""
 
-    def __init__(self, llm_client: LLMClientPort, settings: Settings) -> None:
+    def __init__(self, llm_client: LLMClientPort, model: str, registry: RegistryPort) -> None:
         self.llm_client = llm_client
-        self.settings = settings
+        self.model = model
+        self.registry = registry
 
-    async def draft(
+    def build_prompt(
         self,
         query: str,
         chunks: Sequence[DocumentChunk],
-        api_key: Optional[str] = None,
-        feedback: Optional[str] = None,
+        tool_evidence: Sequence[str],
+        issues: Sequence[str] = (),
     ) -> str:
-        if not chunks:
-            return ABSTENTION_MESSAGE
-
-        context_lines = []
+        blocks = []
         for c in chunks:
-            coord = f"Page {c.page_number}"
-            if c.sheet_name:
-                coord = f"Sheet '{c.sheet_name}', Row {c.row_start}"
-            context_lines.append(f"[{c.chunk_id}] (Source: {coord}): {c.text_content.strip()}")
+            doc = self.registry.get_document(c.doc_id)
+            source = f"{doc.filename} (version {doc.version})" if doc else "unknown"
+            coord = f"Sheet '{c.sheet_name}', Rows {c.row_start}-{c.row_end}" if c.sheet_name else f"Page {c.page_number}"
+            blocks.append(f"[{c.chunk_id}]\nSource: {source}, {coord}\nText: {c.text_content.strip()}")
+        prompt = "Context Documents:\n" + "\n\n".join(blocks)
+        if tool_evidence:
+            prompt += (
+                "\n\nTool Results (computed from the context chunks above; cite the underlying [chunk_id]):\n"
+                + "\n".join(f"- {t}" for t in tool_evidence)
+            )
+        prompt += f"\n\nQuestion: {query}\n"
+        if issues:
+            prompt += "\n" + render_template("prompts/writer_rewrite_feedback.txt", issues="\n".join(issues)) + "\n"
+        return prompt + "\nAnswer with explicit [chunk_id] citations:"
 
-        context_str = "\n\n".join(context_lines)
-        prompt = (
-            f"Context Documents:\n{context_str}\n\n"
-            f"Question: {query}\n"
-        )
-        if feedback:
-            prompt += f"\n[CRITICAL FEEDBACK]: {feedback}\n"
-        prompt += "\nAnswer with explicit [chunk_id] citations:"
-
-        model = self.settings.models.writer_model
-        if self.settings.llm.private_mode:
-            model = self.settings.llm.ollama_writer_model
-
-        return await self.llm_client.generate_response(
+    def stream(self, prompt: str, api_key: Optional[str]) -> AsyncIterator[str]:
+        return self.llm_client.stream_response(
             prompt=prompt,
-            model=model,
-            system_prompt="You are GrantLoom WriterAgent. Cite every claim with genuine [chunk_id] markers.",
+            model=self.model,
+            system_prompt=load_template("prompts/writer_system.txt"),
             temperature=0.0,
             api_key=api_key,
         )
 
 
 class ValidatorAgent:
-    """Validates citations down to physical coordinates, measures faithfulness and resolvability."""
+    """G4 verification of a draft."""
 
     def __init__(self, output_guard: OutputGuard) -> None:
         self.output_guard = output_guard
 
-    def validate(
+    async def validate(
         self,
         draft: str,
-        retrieved_chunk_ids: Sequence[str],
-        is_abstention: bool = False,
-    ) -> tuple[str, list[CitationCoordinate], float, float, float]:
-        cleaned_text, citations, conf = self.output_guard.resolve_citations(
-            draft_text=draft,
-            retrieved_chunk_ids=retrieved_chunk_ids,
-            is_abstention=is_abstention,
-        )
-
-        if is_abstention:
-            return cleaned_text, [], 1.0, 1.0, 1.0
-
-        resolvability = 1.0 if citations else 0.0
-
-        if not citations:
-            return cleaned_text, [], conf, 0.0, 0.0
-
-        # Gather full text evidence from verified citations
-        import re
-        from app.core.constants import ENGLISH_STOP_WORDS
-
-        evidence_texts: list[str] = []
-        for c in citations:
-            chunk = self.output_guard.registry.get_chunk(c.chunk_id)
-            if chunk:
-                evidence_texts.append(chunk.text_content.lower())
-            else:
-                evidence_texts.append(c.excerpt.lower())
-        combined_evidence = " ".join(evidence_texts)
-        evidence_words = set(re.findall(r"\b[a-zA-Z0-9_\-]{2,}\b", combined_evidence))
-
-        FRAMING_WORDS = {
-            "according", "documented", "evidence", "document", "documents",
-            "source", "page", "sheet", "row", "based", "stated", "mentioned",
-            "shows", "indicates", "found", "verified", "proof", "requirement",
-            "note", "stated", "confirmed",
-        }
-        all_stop = set(ENGLISH_STOP_WORDS).union(FRAMING_WORDS)
-
-        # Strip citation markers before evaluating factual claim tokens
-        from app.services.guardrails import CITATION_PATTERN
-        text_without_citations = CITATION_PATTERN.sub("", draft)
-
-        sentences = [s.strip() for s in re.split(r"[.!?]\s+", text_without_citations) if s.strip()]
-        if not sentences:
-            sentences = [text_without_citations]
-
-        sentence_scores: list[float] = []
-        for s in sentences:
-            s_words = [w for w in re.findall(r"\b[a-zA-Z0-9_\-]{2,}\b", s.lower()) if w not in all_stop]
-            if not s_words:
-                continue
-            matched = sum(1 for w in s_words if w in evidence_words)
-            sentence_scores.append(matched / len(s_words))
-
-        if sentence_scores:
-            faithfulness = round(sum(sentence_scores) / len(sentence_scores), 2)
-        else:
-            faithfulness = 0.85
-
-        faithfulness = max(0.0, min(1.0, faithfulness))
-        return cleaned_text, citations, conf, faithfulness, resolvability
+        context_chunk_ids: Sequence[str],
+        tool_evidence: Sequence[str],
+        api_key: Optional[str] = None,
+    ) -> VerificationResult:
+        return await self.output_guard.verify(draft, context_chunk_ids, tool_evidence, api_key)
 
 
 class AgentLoopOrchestrator:
-    """Coordinates PlannerAgent -> RetrieverAgent -> WriterAgent -> ValidatorAgent with bounded rewrite."""
+    """Planner -> Retriever -> Writer -> Validator with a bounded rewrite loop (1 + max_rewrite_attempts drafts)."""
 
     def __init__(
         self,
@@ -304,92 +268,188 @@ class AgentLoopOrchestrator:
         writer: WriterAgent,
         validator: ValidatorAgent,
         settings: Settings,
+        egress: dict[str, Any],
     ) -> None:
         self.planner = planner
         self.retriever = retriever
         self.writer = writer
         self.validator = validator
         self.settings = settings
+        self.egress = egress
 
-    async def run(
-        self,
-        query: str,
-        api_key: Optional[str] = None,
-    ) -> AgentRunResult:
-        # 1. PlannerAgent
-        plan, is_blocked, refusal_or_query = self.planner.plan(query)
-        if is_blocked:
-            return AgentRunResult(
-                plan=plan,
-                tool_executions=[],
-                final_answer=refusal_or_query,
-                citations=[],
-                confidence_score=0.0,
-                faithfulness=0.0,
-                resolvability=1.0,
-                abstention=False,
-                blocked=True,
-            )
+    async def stream(self, query: str, api_key: Optional[str] = None) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+        try:
+            async for event in self._stream(query, api_key):
+                yield event
+        except GrantLoomError as exc:
+            logger.error("Agent pipeline failed: %s", exc.detail)
+            yield ("error", exc.to_problem_details())
 
-        # 2. RetrieverAgent
-        chunks, tool_logs, is_abstention = await self.retriever.execute_tools(refusal_or_query, plan)
+    async def _stream(self, query: str, api_key: Optional[str]) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+        # 0. FR-Q10 egress / provenance: where data goes before any model call
+        yield ("egress", self.egress)
 
-        if is_abstention or not chunks:
-            return AgentRunResult(
-                plan=plan,
-                tool_executions=tool_logs,
-                final_answer=ABSTENTION_MESSAGE,
-                citations=[],
-                confidence_score=1.0,
-                faithfulness=1.0,
-                resolvability=1.0,
-                abstention=True,
-                blocked=False,
-            )
+        # 1. G1 input guard
+        g1 = await self.planner.input_guard.evaluate(query, api_key)
+        yield ("guard", gate_event(g1))
+        if not g1.passed:
+            refusal = g1.metadata.get("refusal") or g1.metadata.get("message") or "Your query was declined by the input guardrail."
+            yield ("generate", {"token": refusal, "attempt": 0})
+            yield ("done", {
+                "answer": refusal, "citations": [], "confidence_score": 0.0, "abstention": False,
+                "refusal": True, "refusal_reason": g1.reason, "verified": False,
+            })
+            return
+        sanitized = g1.metadata.get("sanitized_query", query)
 
-        retrieved_cids = [c.chunk_id for c in chunks]
+        # 2. G2 strategy router + plan
+        available = self.planner.available_strategies()
+        g2 = await self.planner.strategy_router.evaluate(sanitized, available, api_key)
+        strategy = g2.metadata["strategy"]
+        plan = AgentPlan(intent=g2.reason, strategy=strategy, selected_tools=self.planner.tools_for(strategy))
+        yield ("route", gate_event(g2, strategy=strategy, available_strategies=available))
+        yield ("plan", {"strategy": strategy, "tools": plan.selected_tools})
 
-        # 3. WriterAgent + 4. ValidatorAgent (Bounded rewrite loop)
-        max_attempts = self.settings.guardrails.max_rewrite_attempts
+        # 3. Retriever agent (tools + G3)
+        outcome = await self.retriever.execute(sanitized, plan, api_key)
+        for execution in outcome.tool_executions:
+            yield ("tool", {
+                "tool": execution.tool_name, "status": execution.status, "result_count": execution.result_count,
+                "duration_ms": execution.duration_ms, "arguments": execution.arguments,
+            })
+        yield ("retrieve", {
+            "chunks_retrieved": len(outcome.retrieval.chunks),
+            "max_relevance": round(outcome.retrieval.max_relevance, 3),
+            "strategy": strategy,
+            "dense_count": outcome.retrieval.dense_count,
+            "bm25_count": outcome.retrieval.bm25_count,
+            "errors": outcome.retrieval.errors,
+        })
+        yield ("filter", {
+            "gate": "G3",
+            "chunks_retained": len(outcome.chunks),
+            "dropped": outcome.dropped,
+            "abstention": outcome.abstention,
+            "backend": outcome.filter_backend,
+        })
+
+        # FR-Q8 abstention contract
+        if outcome.abstention:
+            yield ("generate", {"token": ABSTENTION_MESSAGE, "attempt": 0})
+            yield ("verify", {"gate": "G4", "verified": True, "confidence_score": 1.0, "citations_count": 0})
+            yield ("done", {
+                "answer": ABSTENTION_MESSAGE, "citations": [], "confidence_score": 1.0, "abstention": True,
+                "strategy": strategy, "verified": True, "tool_executions": [e.__dict__ for e in outcome.tool_executions],
+            })
+            return
+
+        # 4-5. Writer + validator with bounded rewrite loop
+        context_ids = [c.chunk_id for c in outcome.chunks]
+        max_drafts = 1 + self.settings.guardrails.max_rewrite_attempts
+        issues: list[str] = []
+        result: Optional[VerificationResult] = None
+        draft = ""
         attempt = 0
-        feedback = None
-        final_answer = ""
-        final_citations: list[CitationCoordinate] = []
-        conf_score = 0.0
-        faithfulness = 0.0
-        resolvability = 1.0
+        for attempt in range(1, max_drafts + 1):
+            prompt = self.writer.build_prompt(sanitized, outcome.chunks, outcome.tool_evidence, issues)
+            tokens: list[str] = []
+            async for token in self.writer.stream(prompt, api_key):
+                tokens.append(token)
+                yield ("generate", {"token": token, "attempt": attempt})
+            draft = "".join(tokens)
 
-        while attempt < max_attempts:
-            attempt += 1
-            draft = await self.writer.draft(
-                query=refusal_or_query,
-                chunks=chunks,
-                api_key=api_key,
-                feedback=feedback,
-            )
+            if ABSTENTION_MESSAGE.lower() in draft.lower() and "[" not in draft:
+                yield ("verify", {"gate": "G4", "verified": True, "confidence_score": 1.0, "citations_count": 0, "attempt": attempt})
+                yield ("done", {
+                    "answer": ABSTENTION_MESSAGE, "citations": [], "confidence_score": 1.0, "abstention": True,
+                    "strategy": strategy, "verified": True, "attempts": attempt,
+                    "context_chunk_ids": context_ids, "tool_executions": [e.__dict__ for e in outcome.tool_executions],
+                })
+                return
 
-            cleaned_text, citations, conf_score, faithfulness, resolvability = self.validator.validate(
-                draft=draft,
-                retrieved_chunk_ids=retrieved_cids,
-                is_abstention=False,
-            )
-
-            final_answer = cleaned_text
-            final_citations = citations
-
-            if len(citations) > 0:
+            result = await self.validator.validate(draft, context_ids, outcome.tool_evidence, api_key)
+            yield ("verify", {
+                "gate": "G4",
+                "attempt": attempt,
+                "verified": result.passed,
+                "citations_count": len(result.citations),
+                "unresolved_citations": result.unresolved_ids,
+                "resolvability": result.resolvability,
+                "faithfulness": result.faithfulness,
+                "unsupported_claims": [c.claim for c in result.unsupported_claims],
+                "confidence_score": result.confidence_score,
+                "backend": result.backend,
+            })
+            if result.passed or attempt == max_drafts:
                 break
+            issues = result.issues()
+            reason = "unresolved_citations" if (result.unresolved_ids or not result.citations) else "unsupported_claims"
+            REWRITES.labels(reason=reason).inc()
+            yield ("rewrite", {
+                "attempt": attempt,
+                "max_attempts": self.settings.guardrails.max_rewrite_attempts,
+                "reason": reason,
+                "issues": issues,
+                "discard_draft": True,
+            })
 
-            feedback = "Your previous answer lacked verifiable [chunk_id] citations. Cite genuine markers."
+        assert result is not None
+        verified = result.passed
+        done: dict[str, Any] = {
+            "answer": result.cleaned_text,
+            "citations": [citation_dict(c) for c in result.citations],
+            "confidence_score": result.confidence_score,
+            "faithfulness": result.faithfulness,
+            "resolvability": result.resolvability,
+            "abstention": False,
+            "strategy": strategy,
+            "verified": verified,
+            "attempts": attempt,
+            "unverified_claims": [c.claim for c in result.unsupported_claims],
+            "context_chunk_ids": context_ids,
+            "tool_executions": [e.__dict__ for e in outcome.tool_executions],
+        }
+        if not verified:
+            done["warning"] = UNVERIFIED_WARNING
+        yield ("done", done)
 
+    async def run(self, query: str, api_key: Optional[str] = None) -> AgentRunResult:
+        """Consume the event stream into a result object (used by the evaluation runner)."""
+        events: list[tuple[str, dict[str, Any]]] = []
+        plan: Optional[AgentPlan] = None
+        executions: list[AgentToolExecution] = []
+        context_texts: list[str] = []
+        async for name, payload in self.stream(query, api_key):
+            events.append((name, payload))
+            if name == "plan":
+                plan = AgentPlan(intent="", strategy=payload["strategy"], selected_tools=payload["tools"])
+            elif name == "tool":
+                executions.append(AgentToolExecution(
+                    payload["tool"], payload["arguments"], payload["result_count"], payload["status"], payload["duration_ms"],
+                ))
+            elif name == "error":
+                raise RuntimeError(f"Agent pipeline error: {payload.get('detail')}")
+
+        done = next(p for n, p in events if n == "done")
+        for cid in done.get("context_chunk_ids", []):
+            chunk = self.writer.registry.get_chunk(cid)
+            if chunk is not None:
+                context_texts.append(chunk.text_content)
+        citations = [CitationCoordinate(**c) for c in done.get("citations", [])]
         return AgentRunResult(
             plan=plan,
-            tool_executions=tool_logs,
-            final_answer=final_answer,
-            citations=final_citations,
-            confidence_score=conf_score,
-            faithfulness=faithfulness,
-            resolvability=resolvability,
-            abstention=False,
-            blocked=False,
+            tool_executions=executions,
+            final_answer=done["answer"],
+            citations=citations,
+            confidence_score=done.get("confidence_score", 0.0),
+            faithfulness=done.get("faithfulness", 1.0 if done.get("abstention") else 0.0),
+            resolvability=done.get("resolvability", 1.0 if done.get("abstention") else 0.0),
+            abstention=done.get("abstention", False),
+            blocked=bool(done.get("refusal")),
+            refusal_reason=done.get("refusal_reason", ""),
+            verified=done.get("verified", False),
+            unverified_claims=done.get("unverified_claims", []),
+            attempts=done.get("attempts", 0),
+            context_texts=context_texts,
+            events=events,
         )

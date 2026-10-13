@@ -283,6 +283,7 @@ class SqliteRegistryAdapter(RegistryPort):
                 :token_count, :text_content, :content_hash, :metadata_json
             )
         """)
+        fts_delete = text("DELETE FROM chunks_fts WHERE chunk_id = :chunk_id")
         fts_insert = text("""
             INSERT INTO chunks_fts (chunk_id, doc_id, text_content)
             VALUES (:chunk_id, :doc_id, :text_content)
@@ -310,6 +311,7 @@ class SqliteRegistryAdapter(RegistryPort):
                             "metadata_json": json.dumps(c.metadata),
                         },
                     )
+                    conn.execute(fts_delete, {"chunk_id": c.chunk_id})
                     conn.execute(
                         fts_insert,
                         {
@@ -381,7 +383,7 @@ class SqliteRegistryAdapter(RegistryPort):
         except Exception as exc:
             logger.warning("Failed to record audit event '%s': %s", event_type, exc)
 
-    def search_bm25(self, query: str, top_k: int = 10) -> list[KeywordSearchResult]:
+    def search_bm25(self, query: str, top_k: int) -> list[KeywordSearchResult]:
         """Perform full-text BM25 search over chunks_fts table."""
         import re
         from app.core.constants import ENGLISH_STOP_WORDS
@@ -422,9 +424,142 @@ class SqliteRegistryAdapter(RegistryPort):
                     )
                 return results
         except Exception as exc:
-            logger.warning("BM25 FTS search failed for query '%s': %s", query, exc)
-            return []
+            raise StorageError(f"BM25 FTS search failed: {exc}") from exc
 
+    def delete_chunks_for_document(self, doc_id: str) -> None:
+        """Remove a document's chunks and FTS rows so a retried ingestion starts from a clean slate."""
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(text("DELETE FROM chunks_fts WHERE doc_id = :doc_id"), {"doc_id": doc_id})
+                conn.execute(text("DELETE FROM document_chunks WHERE doc_id = :doc_id"), {"doc_id": doc_id})
+        except Exception as exc:
+            raise StorageError(f"Failed to purge chunks for document '{doc_id}': {exc}") from exc
+
+    def get_latest_document_by_filename(self, filename: str) -> Optional[DocumentRecord]:
+        """Return the highest-version document registered under this filename."""
+        query = text("""
+            SELECT doc_id, filename, content_hash, file_type, page_count,
+                   state, version, file_path, error_message, metadata_json, created_at
+            FROM documents WHERE filename = :filename
+            ORDER BY version DESC LIMIT 1
+        """)
+        try:
+            with self.engine.connect() as conn:
+                row = conn.execute(query, {"filename": filename}).mappings().fetchone()
+                return self._row_to_document_record(row) if row else None
+        except Exception as exc:
+            raise StorageError(f"Failed to fetch document by filename '{filename}': {exc}") from exc
+
+    def update_job_stage(self, job_id: str, stage: str) -> None:
+        """Record the pipeline stage an in-progress job has reached."""
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(
+                    text("UPDATE outbox_jobs SET stage = :stage, updated_at = CURRENT_TIMESTAMP WHERE job_id = :job_id"),
+                    {"job_id": job_id, "stage": stage},
+                )
+        except Exception as exc:
+            raise StorageError(f"Failed to update stage of job '{job_id}': {exc}") from exc
+
+    def retry_or_fail_job(self, job_id: str, error: str, max_attempts: int) -> bool:
+        """Return the job to 'pending' if attempts remain, else mark it permanently 'failed'."""
+        try:
+            with self.engine.begin() as conn:
+                attempts = conn.execute(
+                    text("SELECT attempts FROM outbox_jobs WHERE job_id = :job_id"), {"job_id": job_id}
+                ).scalar()
+                retry = attempts is not None and int(attempts) < max_attempts
+                conn.execute(
+                    text("""
+                        UPDATE outbox_jobs
+                        SET status = :status, last_error = :error, updated_at = CURRENT_TIMESTAMP
+                        WHERE job_id = :job_id
+                    """),
+                    {"job_id": job_id, "status": "pending" if retry else "failed", "error": error},
+                )
+                return retry
+        except Exception as exc:
+            raise StorageError(f"Failed to record failure of job '{job_id}': {exc}") from exc
+
+    def requeue_stale_jobs(self, older_than_seconds: Optional[int]) -> int:
+        """Reclaim jobs stuck in 'in_progress' (e.g. after a crash)."""
+        if older_than_seconds is None:
+            sql = "UPDATE outbox_jobs SET status = 'pending', updated_at = CURRENT_TIMESTAMP WHERE status = 'in_progress'"
+            params: dict[str, Any] = {}
+        else:
+            sql = (
+                "UPDATE outbox_jobs SET status = 'pending', updated_at = CURRENT_TIMESTAMP "
+                "WHERE status = 'in_progress' AND updated_at < datetime('now', :age)"
+            )
+            params = {"age": f"-{int(older_than_seconds)} seconds"}
+        try:
+            with self.engine.begin() as conn:
+                return int(conn.execute(text(sql), params).rowcount or 0)
+        except Exception as exc:
+            raise StorageError(f"Failed to requeue stale outbox jobs: {exc}") from exc
+
+    def list_documents_older_than(self, state: str, days: int) -> list[DocumentRecord]:
+        """Documents in the given state whose last update is older than N days."""
+        query = text("""
+            SELECT doc_id, filename, content_hash, file_type, page_count,
+                   state, version, file_path, error_message, metadata_json, created_at
+            FROM documents
+            WHERE state = :state AND updated_at < datetime('now', :age)
+        """)
+        try:
+            with self.engine.connect() as conn:
+                rows = conn.execute(query, {"state": state, "age": f"-{int(days)} days"}).mappings().fetchall()
+                return [self._row_to_document_record(row) for row in rows]
+        except Exception as exc:
+            raise StorageError(f"Failed to list aged '{state}' documents: {exc}") from exc
+
+    def count_chunks(self) -> int:
+        try:
+            with self.engine.connect() as conn:
+                return int(conn.execute(text("SELECT COUNT(*) FROM document_chunks")).scalar() or 0)
+        except Exception as exc:
+            raise StorageError(f"Failed to count chunks: {exc}") from exc
+
+    def ping(self) -> None:
+        try:
+            with self.engine.connect() as conn:
+                conn.execute(text("SELECT 1 FROM documents LIMIT 1"))
+        except Exception as exc:
+            raise StorageError(f"Registry not reachable: {exc}") from exc
+
+
+    REQUIREMENT_COLUMNS = (
+        "req_id", "solicitation_id", "source_chunk_id", "category", "requirement_text",
+        "status", "evidence_chunk_id", "rationale", "decision_backend",
+    )
+
+    def replace_requirements(self, solicitation_id: str, requirements: Sequence[dict[str, Any]]) -> None:
+        cols = ", ".join(self.REQUIREMENT_COLUMNS)
+        marks = ", ".join(f":{c}" for c in self.REQUIREMENT_COLUMNS)
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(
+                    text("DELETE FROM compliance_requirements WHERE solicitation_id = :sid"), {"sid": solicitation_id}
+                )
+                for req in requirements:
+                    conn.execute(
+                        text(f"INSERT INTO compliance_requirements ({cols}) VALUES ({marks})"),
+                        {c: req.get(c) for c in self.REQUIREMENT_COLUMNS},
+                    )
+        except Exception as exc:
+            raise StorageError(f"Failed to persist requirements for '{solicitation_id}': {exc}") from exc
+
+    def list_requirements(self, solicitation_id: str) -> list[dict[str, Any]]:
+        cols = ", ".join(self.REQUIREMENT_COLUMNS)
+        try:
+            with self.engine.connect() as conn:
+                rows = conn.execute(
+                    text(f"SELECT {cols} FROM compliance_requirements WHERE solicitation_id = :sid ORDER BY rowid"),
+                    {"sid": solicitation_id},
+                ).mappings().fetchall()
+                return [dict(r) for r in rows]
+        except Exception as exc:
+            raise StorageError(f"Failed to list requirements for '{solicitation_id}': {exc}") from exc
 
     @staticmethod
     def _row_to_document_record(row: Any) -> DocumentRecord:

@@ -1,0 +1,13 @@
+Choose the retrieval strategy that best answers the query. Allowed strategies:
+<<STRATEGIES>>
+- hybrid: general questions about solicitation or proposal text (dense + keyword search).
+- semantic: conceptual questions phrased differently from the source wording.
+- keyword: exact identifiers, codes, numbers or names.
+- structured: numeric questions over budget spreadsheets (totals, salaries, costs, counts, prices).
+- graph: relationships between people, projects and funders (who leads, who is affiliated, who funded).
+
+<untrusted>
+<<QUERY>>
+</untrusted>
+
+Respond with JSON: {"strategy": "<one allowed strategy>", "confidence": 0.0-1.0, "reason": "<short reason>"}

@@ -8,8 +8,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
-from app.core.errors import SqlGuardError, StorageError
-from app.ports.structured_store import StructuredStorePort
+from app.core.errors import StorageError
+from app.ports.structured_store import StructuredStorePort, TableInfo
 from app.verification.sql_guard import SqlGuard
 
 logger = logging.getLogger("grantloom.adapters.sqlite_structured_store")
@@ -58,36 +58,41 @@ def infer_column_type(values: Sequence[Any]) -> str:
 
 
 class SqliteStructuredStoreAdapter(StructuredStorePort):
-    """Stores structured spreadsheet tables in SQLite with row numbers and AST-guarded queries."""
+    """Stores structured spreadsheet tables in SQLite with row numbers and AST-guarded queries.
 
-    def __init__(
-        self,
-        sqlite_path: str,
-        sql_guard: Optional[SqlGuard] = None,
-    ) -> None:
+    Every loaded table is recorded in `structured_tables` (doc_id, sheet_name) so query results stay
+    traceable to the source document and so queries are confined to spreadsheet tables only.
+    """
+
+    def __init__(self, sqlite_path: str, sql_guard: SqlGuard) -> None:
         self.sqlite_path = sqlite_path
-        self.sql_guard = sql_guard or SqlGuard()
+        self.sql_guard = sql_guard
         Path(self.sqlite_path).parent.mkdir(parents=True, exist_ok=True)
 
-    def _get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.sqlite_path, timeout=5.0)
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.sqlite_path, timeout=self.sql_guard.timeout_seconds)
         conn.row_factory = sqlite3.Row
         return conn
 
+    @staticmethod
+    def table_name_for(doc_id: str, sheet_name: str) -> str:
+        return sanitize_column_name(f"{doc_id}_{sheet_name}")
+
     def load_sheet(
         self,
-        table_name: str,
+        doc_id: str,
+        sheet_name: str,
         columns: Sequence[str],
         rows: Sequence[Sequence[Any]],
-    ) -> None:
+    ) -> str:
         """Create a typed tabular table and insert rows preserving original spreadsheet row numbers."""
-        clean_table = sanitize_column_name(table_name)
+        clean_table = self.table_name_for(doc_id, sheet_name)
         sanitized_cols = [sanitize_column_name(c) for c in columns]
 
-        # Ensure uniqueness of column names
-        seen_cols: set[str] = set()
+        # Ensure uniqueness of column names (row_number is reserved for provenance)
+        seen_cols: set[str] = {"row_number"}
         unique_cols: list[str] = []
-        for idx, col in enumerate(sanitized_cols):
+        for col in sanitized_cols:
             candidate = col
             counter = 1
             while candidate in seen_cols:
@@ -96,112 +101,115 @@ class SqliteStructuredStoreAdapter(StructuredStorePort):
             seen_cols.add(candidate)
             unique_cols.append(candidate)
 
-        # Infer types column by column (rows is list of tuples: (row_number, [val1, val2, ...]))
-        col_values: list[list[Any]] = [[] for _ in unique_cols]
-        for row in rows:
+        # rows are (row_number, [values...]) tuples, or bare value lists (1-indexed)
+        normalized: list[tuple[int, list[Any]]] = []
+        for r_idx, row in enumerate(rows, start=1):
             if len(row) >= 2 and isinstance(row[0], int) and isinstance(row[1], (list, tuple)):
-                # Format: (row_number, values)
-                r_vals = row[1]
+                normalized.append((row[0], list(row[1])))
             else:
-                # Format: values only, 1-indexed
-                r_vals = row
+                normalized.append((r_idx, list(row)))
 
-            for c_idx, val in enumerate(r_vals):
-                if c_idx < len(col_values):
-                    col_values[c_idx].append(val)
-
+        col_values: list[list[Any]] = [[] for _ in unique_cols]
+        for _, vals in normalized:
+            for c_idx, val in enumerate(vals[: len(unique_cols)]):
+                col_values[c_idx].append(val)
         col_types = [infer_column_type(vals) for vals in col_values]
 
-        col_defs = ["row_number INTEGER"]
-        for c_name, c_type in zip(unique_cols, col_types):
-            col_defs.append(f'"{c_name}" {c_type}')
+        col_defs = ["row_number INTEGER"] + [f'"{n}" {t}' for n, t in zip(unique_cols, col_types)]
 
-        create_sql = f'CREATE TABLE IF NOT EXISTS "{clean_table}" ({", ".join(col_defs)});'
+        to_insert = []
+        for row_num, vals in normalized:
+            vals = (vals + [None] * len(unique_cols))[: len(unique_cols)]
+            clean_row_vals: list[Any] = []
+            for val, c_type in zip(vals, col_types):
+                if val is None:
+                    clean_row_vals.append(None)
+                elif c_type in ("INTEGER", "REAL"):
+                    caster = int if c_type == "INTEGER" else float
+                    try:
+                        clean_row_vals.append(caster(str(val).replace(",", "").replace("$", "").strip()))
+                    except (ValueError, TypeError):
+                        clean_row_vals.append(None)
+                else:
+                    clean_row_vals.append(str(val).strip())
+            to_insert.append([row_num] + clean_row_vals)
 
-        conn = self._get_connection()
+        conn = self._connect()
         try:
             cursor = conn.cursor()
             cursor.execute(f'DROP TABLE IF EXISTS "{clean_table}";')
-            cursor.execute(create_sql)
-
-            # Insert rows
+            cursor.execute(f'CREATE TABLE "{clean_table}" ({", ".join(col_defs)});')
             placeholders = ", ".join(["?"] * (len(unique_cols) + 1))
-            insert_sql = f'INSERT INTO "{clean_table}" VALUES ({placeholders});'
-
-            to_insert = []
-            for r_idx, row in enumerate(rows, start=1):
-                if len(row) >= 2 and isinstance(row[0], int) and isinstance(row[1], (list, tuple)):
-                    row_num = row[0]
-                    vals = list(row[1])
-                else:
-                    row_num = r_idx
-                    vals = list(row)
-
-                # Pad or truncate values to match columns
-                if len(vals) < len(unique_cols):
-                    vals.extend([None] * (len(unique_cols) - len(vals)))
-                else:
-                    vals = vals[: len(unique_cols)]
-
-                # Convert numeric strings if column is numeric
-                clean_row_vals = []
-                for val, c_type in zip(vals, col_types):
-                    if val is None:
-                        clean_row_vals.append(None)
-                    elif c_type == "INTEGER":
-                        try:
-                            clean_row_vals.append(int(str(val).replace(",", "").replace("$", "").strip()))
-                        except (ValueError, TypeError):
-                            clean_row_vals.append(None)
-                    elif c_type == "REAL":
-                        try:
-                            clean_row_vals.append(float(str(val).replace(",", "").replace("$", "").strip()))
-                        except (ValueError, TypeError):
-                            clean_row_vals.append(None)
-                    else:
-                        clean_row_vals.append(str(val).strip())
-
-                to_insert.append([row_num] + clean_row_vals)
-
-            cursor.executemany(insert_sql, to_insert)
+            cursor.executemany(f'INSERT INTO "{clean_table}" VALUES ({placeholders});', to_insert)
+            cursor.execute(
+                "INSERT OR REPLACE INTO structured_tables (table_name, doc_id, sheet_name, row_count) VALUES (?, ?, ?, ?)",
+                (clean_table, doc_id, sheet_name, len(to_insert)),
+            )
             conn.commit()
-            logger.info("Loaded sheet into table '%s' with %d rows.", clean_table, len(to_insert))
+            logger.info("Loaded sheet '%s' of doc '%s' into table '%s' (%d rows).", sheet_name, doc_id, clean_table, len(to_insert))
+            return clean_table
         except Exception as exc:
             conn.rollback()
             raise StorageError(f"Failed to load sheet into table '{clean_table}': {exc}") from exc
         finally:
             conn.close()
 
-    def execute_query(self, sql_query: str) -> list[dict[str, Any]]:
-        """Execute a validated read-only SELECT statement against the structured tables."""
-        conn = self._get_connection()
+    def list_tables(self, doc_ids: Optional[Sequence[str]] = None) -> list[TableInfo]:
+        """List loaded tables (with column schemas), optionally restricted to the given documents."""
+        conn = self._connect()
         try:
-            return self.sql_guard.execute_safe(conn, sql_query)
+            cursor = conn.cursor()
+            if doc_ids is not None:
+                if not doc_ids:
+                    return []
+                marks = ", ".join("?" for _ in doc_ids)
+                cursor.execute(
+                    f"SELECT table_name, doc_id, sheet_name, row_count FROM structured_tables WHERE doc_id IN ({marks}) ORDER BY table_name",
+                    list(doc_ids),
+                )
+            else:
+                cursor.execute("SELECT table_name, doc_id, sheet_name, row_count FROM structured_tables ORDER BY table_name")
+            infos = [
+                TableInfo(table_name=r["table_name"], doc_id=r["doc_id"], sheet_name=r["sheet_name"], row_count=r["row_count"])
+                for r in cursor.fetchall()
+            ]
+            for info in infos:
+                cursor.execute(f'PRAGMA table_info("{info.table_name}");')
+                info.columns = [{"name": r["name"], "type": r["type"]} for r in cursor.fetchall()]
+            return infos
+        except sqlite3.Error as exc:
+            raise StorageError(f"Failed to list structured tables: {exc}") from exc
+        finally:
+            conn.close()
+
+    def execute_query(
+        self,
+        sql_query: str,
+        allowed_tables: Optional[Sequence[str]] = None,
+    ) -> list[dict[str, Any]]:
+        """Execute a validated read-only SELECT confined to registered spreadsheet tables."""
+        known = {t.table_name for t in self.list_tables()}
+        allowed = known if allowed_tables is None else known & set(allowed_tables)
+        conn = self._connect()
+        try:
+            return self.sql_guard.execute_safe(conn, sql_query, allowed_tables=allowed)
         finally:
             conn.close()
 
     def delete_document_tables(self, doc_id: str) -> None:
         """Purge tabular tables associated with a given document ID."""
-        clean_prefix = sanitize_column_name(f"doc_{doc_id}")
-        conn = self._get_connection()
+        conn = self._connect()
         try:
             cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE ?", (f"{clean_prefix}%",))
+            cursor.execute("SELECT table_name FROM structured_tables WHERE doc_id = ?", (doc_id,))
             tables = [row[0] for row in cursor.fetchall()]
             for tbl in tables:
                 cursor.execute(f'DROP TABLE IF EXISTS "{tbl}";')
+            cursor.execute("DELETE FROM structured_tables WHERE doc_id = ?", (doc_id,))
             conn.commit()
             logger.info("Purged %d tables for document '%s'.", len(tables), doc_id)
-        finally:
-            conn.close()
-
-    def get_table_schema(self, table_name: str) -> list[dict[str, str]]:
-        """Return list of column names and types for a table."""
-        clean_tbl = sanitize_column_name(table_name)
-        conn = self._get_connection()
-        try:
-            cursor = conn.cursor()
-            cursor.execute(f'PRAGMA table_info("{clean_tbl}");')
-            return [{"name": row["name"], "type": row["type"]} for row in cursor.fetchall()]
+        except sqlite3.Error as exc:
+            conn.rollback()
+            raise StorageError(f"Failed to purge structured tables for '{doc_id}': {exc}") from exc
         finally:
             conn.close()

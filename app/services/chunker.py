@@ -4,16 +4,23 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import Sequence
 
 from app.ports.models import DocumentChunk
 from app.services.extractor import ExtractionResult
 
 
+SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+")
+SECTION_NUMBER_RE = re.compile(r"(?:^|\s)\d+(?:\.\d+)*\.$")  # "1." / "3.2." headings stay with their title
+ABBREVIATIONS = (
+    "Dr.", "Prof.", "Mr.", "Mrs.", "Ms.", "St.", "No.", "Inc.", "Ltd.", "Co.", "U.S.", "e.g.", "i.e.",
+    "vs.", "Ph.D.", "M.S.", "M.D.", "Fig.", "Sec.", "approx.",
+)
+
+
 class DocumentChunker:
     """Produces deterministic chunk IDs (doc_id:page:index) with strict page boundaries."""
 
-    def __init__(self, target_chunk_size: int = 800, chunk_overlap: int = 100) -> None:
+    def __init__(self, target_chunk_size: int, chunk_overlap: int) -> None:
         self.target_chunk_size = target_chunk_size
         self.chunk_overlap = chunk_overlap
 
@@ -85,45 +92,52 @@ class DocumentChunker:
 
         return all_chunks
 
+    @staticmethod
+    def _sentences(text: str) -> list[str]:
+        """Sentence split that does not break after abbreviations such as 'Dr.' or 'U.S.'."""
+        merged: list[str] = []
+        for piece in SENTENCE_END_RE.split(text):
+            if merged and (merged[-1].endswith(ABBREVIATIONS) or SECTION_NUMBER_RE.search(merged[-1])):
+                merged[-1] = f"{merged[-1]} {piece}"
+            else:
+                merged.append(piece)
+        return merged
+
     def _split_text(self, text: str) -> list[str]:
-        """Split text into chunks by paragraphs or sliding window."""
+        """Pack paragraphs (or, for long paragraphs, sentences) into windows of at most
+        target_chunk_size characters; consecutive windows share up to chunk_overlap characters."""
         if len(text) <= self.target_chunk_size:
             return [text]
 
-        paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
-        chunks: list[str] = []
-        current: list[str] = []
-        current_len = 0
-
-        for p in paragraphs:
-            if current_len + len(p) > self.target_chunk_size and current:
-                chunks.append("\n\n".join(current))
-                # Keep last paragraph for overlap if reasonable
-                if len(p) < self.target_chunk_size // 2:
-                    current = [p]
-                    current_len = len(p)
-                else:
-                    current = []
-                    current_len = 0
-            if len(p) > self.target_chunk_size:
-                # Long paragraph: sliding window by sentence or words
-                sentences = re.split(r"(?<=[.!?])\s+", p)
-                sub_current: list[str] = []
-                sub_len = 0
-                for s in sentences:
-                    if sub_len + len(s) > self.target_chunk_size and sub_current:
-                        chunks.append(" ".join(sub_current))
-                        sub_current = []
-                        sub_len = 0
-                    sub_current.append(s)
-                    sub_len += len(s) + 1
-                if sub_current:
-                    chunks.append(" ".join(sub_current))
+        units: list[tuple[str, str]] = []  # (text, separator used before it)
+        for p in (p.strip() for p in re.split(r"\n\s*\n", text)):
+            if not p:
+                continue
+            if len(p) <= self.target_chunk_size:
+                units.append((p, "\n\n"))
             else:
-                current.append(p)
-                current_len += len(p) + 2
+                units.extend((s, " ") for s in self._sentences(p) if s.strip())
 
+        windows: list[str] = []
+        current: list[tuple[str, str]] = []
+
+        def length(items: list[tuple[str, str]]) -> int:
+            return sum(len(t) + len(sep) for t, sep in items)
+
+        for unit in units:
+            if current and length(current) + len(unit[0]) > self.target_chunk_size:
+                windows.append(self._join(current))
+                overlap: list[tuple[str, str]] = []
+                for prev in reversed(current[1:]):
+                    if length(overlap) + len(prev[0]) > self.chunk_overlap:
+                        break
+                    overlap.insert(0, prev)
+                current = overlap
+            current.append(unit)
         if current:
-            chunks.append("\n\n".join(current))
+            windows.append(self._join(current))
+        return windows
 
-        return chunks
+    @staticmethod
+    def _join(items: list[tuple[str, str]]) -> str:
+        return "".join((sep if i else "") + t for i, (t, sep) in enumerate(items))

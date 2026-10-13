@@ -28,5 +28,13 @@ class GraphStorePort(ABC):
 
     @abstractmethod
     def delete_document(self, doc_id: str) -> None:
-        """Purge all nodes and edges belonging to a given document ID."""
+        """Purge every edge whose provenance chunk belongs to doc_id, then orphaned nodes.
+
+        Must raise StorageError on failure so the deletion saga can retry.
+        """
+        ...
+
+    @abstractmethod
+    def ping(self) -> None:
+        """Raise StorageError if the graph store is not reachable (readiness probe)."""
         ...

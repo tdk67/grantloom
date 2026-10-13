@@ -1,21 +1,20 @@
-"""Dependency injection providers for FastAPI routes."""
+"""Composition root: builds every adapter and service from Settings (no implicit fallbacks)."""
 
 from __future__ import annotations
 
-from functools import lru_cache
+import ipaddress
 from typing import Optional
 
-from fastapi import Depends, Header
+from fastapi import Depends, Header, Request
 
 from app.adapters.chroma_adapter import ChromaVectorStoreAdapter
-from app.adapters.embedder_adapter import DeterministicEmbedder, OpenRouterEmbedder
 from app.adapters.kuzu_adapter import KuzuGraphStoreAdapter
-from app.adapters.ollama_client import OllamaClientAdapter
-from app.adapters.openrouter_client import OpenRouterClientAdapter
 from app.adapters.sqlite_registry import SqliteRegistryAdapter
 from app.adapters.sqlite_structured_store import SqliteStructuredStoreAdapter
 from app.core.config import Settings, get_settings
 from app.core.errors import AuthenticationError
+from app.core.rate_limit import limiter
+from app.ports.decision_backend import DecisionBackendPort
 from app.ports.embedder import EmbedderPort
 from app.ports.graph_store import GraphStorePort
 from app.ports.llm_client import LLMClientPort
@@ -24,172 +23,191 @@ from app.ports.structured_store import StructuredStorePort
 from app.ports.vector_store import VectorStorePort
 from app.services.ask_service import AskService
 from app.services.chunker import DocumentChunker
+from app.services.compliance_service import ComplianceService
 from app.services.extractor import DocumentExtractor
+from app.services.guardrails import IngestionScanner
+from app.services.inference import (
+    InferenceProfile,
+    build_decision_backend,
+    build_embedder,
+    build_inference_profile,
+)
 from app.services.ingest_service import IngestionService
-from app.services.retrieval_service import HybridRetrievalService
+from app.services.key_vault import EphemeralKeyVault
+from app.services.retrieval_service import HybridRetrievalService, corpus_overlap
+from app.verification.sql_guard import SqlGuard
 from app.workers.ingest_worker import IngestWorker
 
-
-_registry_instance: Optional[RegistryPort] = None
-_vector_store_instance: Optional[VectorStorePort] = None
-_embedder_instance: Optional[EmbedderPort] = None
-_structured_store_instance: Optional[StructuredStorePort] = None
-_graph_store_instance: Optional[GraphStorePort] = None
-_ingest_service_instance: Optional[IngestionService] = None
-_ingest_worker_instance: Optional[IngestWorker] = None
-_llm_client_instance: Optional[LLMClientPort] = None
-_retrieval_service_instance: Optional[HybridRetrievalService] = None
-_ask_service_instance: Optional[AskService] = None
+_instances: dict[str, object] = {}
 
 
-
-def get_registry(settings: Settings = Depends(get_settings)) -> RegistryPort:
-    global _registry_instance
-    if _registry_instance is None:
-        _registry_instance = SqliteRegistryAdapter(settings.database.sqlite_path)
-    return _registry_instance
+def _singleton(name: str, factory):
+    if name not in _instances:
+        _instances[name] = factory()
+    return _instances[name]
 
 
-def get_vector_store(settings: Settings = Depends(get_settings)) -> VectorStorePort:
-    global _vector_store_instance
-    if _vector_store_instance is None:
-        _vector_store_instance = ChromaVectorStoreAdapter(settings.database.chroma_path)
-    return _vector_store_instance
-
-
-def get_embedder(settings: Settings = Depends(get_settings)) -> EmbedderPort:
-    global _embedder_instance
-    if _embedder_instance is None:
-        # If openrouter_api_key is available, use OpenRouterEmbedder, else DeterministicEmbedder
-        api_key = settings.secrets.openrouter_api_key
-        if api_key:
-            _embedder_instance = OpenRouterEmbedder(
-                api_key=api_key,
-                model=settings.models.embedding_model,
-            )
-        else:
-            _embedder_instance = DeterministicEmbedder()
-    return _embedder_instance
-
-
-def get_ingest_service(settings: Settings = Depends(get_settings)) -> IngestionService:
-    global _ingest_service_instance
-    if _ingest_service_instance is None:
-        reg = get_registry(settings)
-        _ingest_service_instance = IngestionService(registry=reg, settings=settings)
-    return _ingest_service_instance
-
-
-def get_structured_store(settings: Settings = Depends(get_settings)) -> StructuredStorePort:
-    global _structured_store_instance
-    if _structured_store_instance is None:
-        _structured_store_instance = SqliteStructuredStoreAdapter(settings.database.sqlite_path)
-    return _structured_store_instance
-
-
-def get_graph_store(settings: Settings = Depends(get_settings)) -> GraphStorePort:
-    global _graph_store_instance
-    if _graph_store_instance is None:
-        _graph_store_instance = KuzuGraphStoreAdapter(settings.database.kuzu_path)
-    return _graph_store_instance
-
-
-def get_ingest_worker(settings: Settings = Depends(get_settings)) -> IngestWorker:
-    global _ingest_worker_instance
-    if _ingest_worker_instance is None:
-        reg = get_registry(settings)
-        vs = get_vector_store(settings)
-        emb = get_embedder(settings)
-        ss = get_structured_store(settings)
-        gs = get_graph_store(settings)
-        ext = DocumentExtractor(max_pages_per_doc=settings.limits.max_pages_per_doc)
-        chk = DocumentChunker()
-        _ingest_worker_instance = IngestWorker(
-            registry=reg,
-            vector_store=vs,
-            embedder=emb,
-            structured_store=ss,
-            graph_store=gs,
-            extractor=ext,
-            chunker=chk,
-        )
-    return _ingest_worker_instance
+def get_inference_profile(settings: Settings = Depends(get_settings)) -> InferenceProfile:
+    return _singleton("profile", lambda: build_inference_profile(settings))
 
 
 def get_llm_client(settings: Settings = Depends(get_settings)) -> LLMClientPort:
-    global _llm_client_instance
-    if _llm_client_instance is None:
-        if settings.llm.private_mode or not settings.secrets.openrouter_api_key:
-            _llm_client_instance = OllamaClientAdapter(
-                base_url=settings.llm.ollama_base_url,
-                default_model=settings.llm.ollama_writer_model,
-            )
-        else:
-            _llm_client_instance = OpenRouterClientAdapter()
-    return _llm_client_instance
+    return get_inference_profile(settings).client
+
+
+def get_decision_backend(settings: Settings = Depends(get_settings)) -> DecisionBackendPort:
+    registry = get_registry(settings)
+    return _singleton(
+        "decision",
+        lambda: build_decision_backend(settings, get_inference_profile(settings), lambda q: corpus_overlap(registry, q)),
+    )
+
+
+def get_registry(settings: Settings = Depends(get_settings)) -> RegistryPort:
+    return _singleton("registry", lambda: SqliteRegistryAdapter(settings.database.sqlite_path))
+
+
+def get_embedder(settings: Settings = Depends(get_settings)) -> EmbedderPort:
+    return _singleton("embedder", lambda: build_embedder(settings))
+
+
+def get_vector_store(settings: Settings = Depends(get_settings)) -> VectorStorePort:
+    return _singleton(
+        "vector_store",
+        lambda: ChromaVectorStoreAdapter(settings.database.chroma_path, get_embedder(settings).fingerprint),
+    )
+
+
+def get_structured_store(settings: Settings = Depends(get_settings)) -> StructuredStorePort:
+    return _singleton(
+        "structured_store",
+        lambda: SqliteStructuredStoreAdapter(
+            settings.database.sqlite_path,
+            SqlGuard(max_rows=settings.sql_guard.max_rows, timeout_seconds=settings.sql_guard.timeout_seconds),
+        ),
+    )
+
+
+def get_graph_store(settings: Settings = Depends(get_settings)) -> GraphStorePort:
+    return _singleton("graph_store", lambda: KuzuGraphStoreAdapter(settings.database.kuzu_path))
+
+
+def get_key_vault() -> EphemeralKeyVault:
+    return _singleton("key_vault", EphemeralKeyVault)
+
+
+def get_ingest_service(settings: Settings = Depends(get_settings)) -> IngestionService:
+    return _singleton("ingest_service", lambda: IngestionService(registry=get_registry(settings), settings=settings))
+
+
+def get_ingest_worker(settings: Settings = Depends(get_settings)) -> IngestWorker:
+    def build() -> IngestWorker:
+        profile = get_inference_profile(settings)
+        return IngestWorker(
+            registry=get_registry(settings),
+            vector_store=get_vector_store(settings),
+            embedder=get_embedder(settings),
+            scanner=IngestionScanner(get_decision_backend(settings), settings.guardrails),
+            extractor=DocumentExtractor(
+                max_pages_per_doc=settings.limits.max_pages_per_doc,
+                rows_per_chunk=settings.chunking.rows_per_chunk,
+            ),
+            chunker=DocumentChunker(
+                target_chunk_size=settings.chunking.target_chunk_size,
+                chunk_overlap=settings.chunking.chunk_overlap,
+            ),
+            ingestion=settings.ingestion,
+            quarantine_retention_days=settings.guardrails.quarantine_retention_days,
+            structured_store=get_structured_store(settings),
+            graph_store=get_graph_store(settings),
+            key_vault=get_key_vault(),
+            tier2_requires_key=profile.requires_byok_key,
+        )
+
+    return _singleton("ingest_worker", build)
+
+
+def get_retrieval_service(settings: Settings = Depends(get_settings)) -> HybridRetrievalService:
+    return _singleton(
+        "retrieval_service",
+        lambda: HybridRetrievalService(
+            vector_store=get_vector_store(settings),
+            registry=get_registry(settings),
+            embedder=get_embedder(settings),
+            settings=settings,
+        ),
+    )
+
+
+def get_ask_service(settings: Settings = Depends(get_settings)) -> AskService:
+    def build() -> AskService:
+        profile = get_inference_profile(settings)
+        decision = get_decision_backend(settings)
+        return AskService(
+            retrieval_service=get_retrieval_service(settings),
+            registry=get_registry(settings),
+            llm_client=profile.client,
+            settings=settings,
+            decision_backend=decision,
+            writer_model=profile.writer_model,
+            egress=profile.egress(decision),
+            structured_store=get_structured_store(settings),
+            graph_store=get_graph_store(settings),
+        )
+
+    return _singleton("ask_service", build)
+
+
+def get_compliance_service(settings: Settings = Depends(get_settings)) -> ComplianceService:
+    return _singleton(
+        "compliance_service",
+        lambda: ComplianceService(
+            registry=get_registry(settings),
+            vector_store=get_vector_store(settings),
+            embedder=get_embedder(settings),
+            decision_backend=get_decision_backend(settings),
+            settings=settings,
+        ),
+    )
+
+
+def _is_loopback(host: Optional[str]) -> bool:
+    if not host:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def verify_master_api_key(
+    request: Request,
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
     settings: Settings = Depends(get_settings),
 ) -> None:
-    """Enforce master API key on mutating administrative and ingestion endpoints if configured."""
+    """Every /api/v1 route requires the master key when one is configured.
+
+    Without a configured key the API only serves loopback clients, so an accidentally exposed
+    instance never runs unauthenticated (review-02 §4.2).
+    """
     expected_key = settings.secrets.master_api_key
     if expected_key:
         if not x_api_key or x_api_key.strip() != expected_key.strip():
             raise AuthenticationError("Invalid or missing master API key in X-API-Key header.")
-
-
-def get_retrieval_service(settings: Settings = Depends(get_settings)) -> HybridRetrievalService:
-    global _retrieval_service_instance
-    if _retrieval_service_instance is None:
-        vs = get_vector_store(settings)
-        reg = get_registry(settings)
-        emb = get_embedder(settings)
-        _retrieval_service_instance = HybridRetrievalService(
-            vector_store=vs,
-            registry=reg,
-            embedder=emb,
-            settings=settings,
+        return
+    client_host = request.client.host if request.client else None
+    if not _is_loopback(client_host):
+        raise AuthenticationError(
+            "No MASTER_API_KEY is configured, so only loopback clients are served. Set MASTER_API_KEY to allow remote access."
         )
-    return _retrieval_service_instance
-
-
-def get_ask_service(settings: Settings = Depends(get_settings)) -> AskService:
-    global _ask_service_instance
-    if _ask_service_instance is None:
-        ret = get_retrieval_service(settings)
-        reg = get_registry(settings)
-        llm = get_llm_client(settings)
-        _ask_service_instance = AskService(
-            retrieval_service=ret,
-            registry=reg,
-            llm_client=llm,
-            settings=settings,
-        )
-    return _ask_service_instance
-
 
 
 def reset_dependencies() -> None:
-    """Reset cached singletons (useful for test isolation)."""
-    global _registry_instance, _vector_store_instance, _embedder_instance
-    global _structured_store_instance, _graph_store_instance
-    global _ingest_service_instance, _ingest_worker_instance
-    global _llm_client_instance, _retrieval_service_instance, _ask_service_instance
-    if _graph_store_instance is not None:
-        try:
-            _graph_store_instance.close()
-        except Exception:
-            pass
-    _registry_instance = None
-    _vector_store_instance = None
-    _embedder_instance = None
-    _structured_store_instance = None
-    _graph_store_instance = None
-    _ingest_service_instance = None
-    _ingest_worker_instance = None
-    _llm_client_instance = None
-    _retrieval_service_instance = None
-    _ask_service_instance = None
-
+    """Reset cached singletons and rate-limit counters (test isolation)."""
+    graph = _instances.get("graph_store")
+    if isinstance(graph, KuzuGraphStoreAdapter):
+        graph.close()
+    _instances.clear()
+    limiter.reset()

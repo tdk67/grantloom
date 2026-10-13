@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import logging
-from typing import Sequence
+import re
+import time
+from dataclasses import dataclass, field
 
 from app.core.config import Settings
+from app.core.errors import GrantLoomError, StorageError
+from app.core.text import TOKEN_RE, content_tokens, overlap_ratio
 from app.ports.embedder import EmbedderPort
 from app.ports.models import DocumentChunk, KeywordSearchResult, VectorSearchResult
 from app.ports.registry import RegistryPort
@@ -14,6 +18,26 @@ from app.ports.vector_store import VectorStorePort
 logger = logging.getLogger("grantloom.services.retrieval")
 
 ABSTENTION_MESSAGE = "This information was not found in the indexed documents"
+
+NEAR_DUPLICATE_RE = re.compile(r"\d+|\s+")
+
+DENSE_STRATEGIES = ("hybrid", "semantic", "structured", "graph")
+KEYWORD_STRATEGIES = ("hybrid", "keyword", "structured", "graph")
+
+
+@dataclass
+class RetrievalResult:
+    """Fused retrieval outcome with per-channel evidence for tool logs and the G3 filter."""
+
+    chunks: list[DocumentChunk]
+    max_relevance: float
+    abstention: bool
+    dense_scores: dict[str, float] = field(default_factory=dict)
+    dense_count: int = 0
+    bm25_count: int = 0
+    dense_ms: float = 0.0
+    bm25_ms: float = 0.0
+    errors: list[str] = field(default_factory=list)
 
 
 class HybridRetrievalService:
@@ -31,116 +55,116 @@ class HybridRetrievalService:
         self.embedder = embedder
         self.settings = settings
 
-    async def retrieve(
-        self,
-        query: str,
-        strategy: str = "hybrid",
-    ) -> tuple[list[DocumentChunk], float, bool]:
-        """Execute retrieval and return (candidate_chunks, max_relevance, is_abstention).
-        
-        If no chunks pass the min_relevance_threshold, returns empty chunk list with is_abstention=True.
-        """
+    async def retrieve(self, query: str, strategy: str = "hybrid") -> RetrievalResult:
+        """Execute retrieval. With no chunk above min_relevance_threshold and no substantive keyword
+        match, returns an abstention result (FR-Q8)."""
+        cfg = self.settings.retrieval
         dense_results: list[VectorSearchResult] = []
         bm25_results: list[KeywordSearchResult] = []
+        errors: list[str] = []
+        dense_ms = bm25_ms = 0.0
 
-        top_k_dense = self.settings.retrieval.dense_top_k
-        top_k_bm25 = self.settings.retrieval.bm25_top_k
-        rrf_k = self.settings.retrieval.rrf_k
-        min_threshold = self.settings.retrieval.min_relevance_threshold
-        rerank_top_k = self.settings.retrieval.rerank_top_k
-
-        # 1. Dense Semantic Search (or fallback)
-        if strategy in ("hybrid", "semantic", "structured", "graph", "composite"):
+        # 1. Dense semantic search
+        if strategy in DENSE_STRATEGIES:
+            started = time.perf_counter()
             try:
                 query_vector = await self.embedder.embed_text(query)
-                dense_results = self.vector_store.query(query_vector, top_k=top_k_dense)
-            except Exception as exc:
-                logger.warning("Dense retrieval failed: %s", exc)
-                dense_results = []
+                dense_results = self.vector_store.query(query_vector, top_k=cfg.dense_top_k)
+            except GrantLoomError as exc:
+                errors.append(f"dense_vector_search: {exc.detail}")
+                logger.error("Dense retrieval failed: %s", exc)
+            dense_ms = (time.perf_counter() - started) * 1000
 
-        # 2. SQLite FTS5 BM25 Keyword Search (or fallback)
-        if strategy in ("hybrid", "keyword", "structured", "graph", "composite"):
+        # 2. SQLite FTS5 BM25 keyword search
+        if strategy in KEYWORD_STRATEGIES:
+            started = time.perf_counter()
             try:
-                bm25_results = self.registry.search_bm25(query, top_k=top_k_bm25)
-            except Exception as exc:
-                logger.warning("BM25 retrieval failed: %s", exc)
-                bm25_results = []
+                bm25_results = self.registry.search_bm25(query, top_k=cfg.bm25_top_k)
+            except GrantLoomError as exc:
+                errors.append(f"bm25_keyword_search: {exc.detail}")
+                logger.error("BM25 retrieval failed: %s", exc)
+            bm25_ms = (time.perf_counter() - started) * 1000
 
+        attempted = (strategy in DENSE_STRATEGIES) + (strategy in KEYWORD_STRATEGIES)
+        if attempted and len(errors) == attempted:
+            raise StorageError("All retrieval channels failed: " + "; ".join(errors))
 
-        # 3. Check for Zero Matching or Sub-threshold Chunks (FR-Q8 Abstention)
-        max_dense_score = max((r.score for r in dense_results), default=0.0)
-        has_bm25 = len(bm25_results) > 0
-
-        has_substantive_bm25 = False
-        if has_bm25:
-            import re
-            from app.core.constants import ENGLISH_STOP_WORDS
-
-            query_tokens = [w for w in re.findall(r"\b[a-zA-Z0-9_\-]{2,}\b", query.lower()) if w not in ENGLISH_STOP_WORDS]
-            if not query_tokens:
-                has_substantive_bm25 = True
-            else:
-                best_overlap = 0
-                for b_res in bm25_results[:5]:
-                    chunk_tokens = set(re.findall(r"\b[a-zA-Z0-9_\-]{2,}\b", b_res.text.lower()))
-                    overlap = len(set(query_tokens).intersection(chunk_tokens))
-                    if overlap > best_overlap:
-                        best_overlap = overlap
-
-                if len(query_tokens) == 1:
-                    has_substantive_bm25 = best_overlap >= 1
-                elif len(query_tokens) <= 3:
-                    has_substantive_bm25 = best_overlap >= 2
-                else:
-                    has_substantive_bm25 = best_overlap >= 3 or (best_overlap >= 2 and (best_overlap / len(query_tokens)) >= 0.50)
-
-        # If zero hits across both, or dense score is below min_relevance_threshold and no substantive BM25 matches
-        if not dense_results and not has_substantive_bm25:
-            logger.info("Abstention triggered: zero retrieval matches.")
-            return [], 0.0, True
-
-        if max_dense_score < min_threshold and not has_substantive_bm25:
-            logger.info(
-                "Abstention triggered: max dense score %.3f below threshold %.3f without substantive BM25 hits.",
-                max_dense_score,
-                min_threshold,
+        def result(chunks: list[DocumentChunk], relevance: float, abstention: bool) -> RetrievalResult:
+            return RetrievalResult(
+                chunks=chunks,
+                max_relevance=relevance,
+                abstention=abstention,
+                dense_scores={r.chunk_id: r.score for r in dense_results},
+                dense_count=len(dense_results),
+                bm25_count=len(bm25_results),
+                dense_ms=round(dense_ms, 1),
+                bm25_ms=round(bm25_ms, 1),
+                errors=errors,
             )
-            return [], max_dense_score, True
+
+        # 3. FR-Q8 abstention check
+        max_dense_score = max((r.score for r in dense_results), default=0.0)
+        query_tokens = set(content_tokens(query))
+        best_overlap = 0
+        for b_res in bm25_results[:5]:
+            best_overlap = max(best_overlap, len(query_tokens & set(TOKEN_RE.findall(b_res.text.lower()))))
+
+        if not bm25_results:
+            has_substantive_bm25 = False
+        elif not query_tokens:
+            has_substantive_bm25 = True
+        elif len(query_tokens) == 1:
+            has_substantive_bm25 = best_overlap >= 1
+        elif len(query_tokens) <= 3:
+            has_substantive_bm25 = best_overlap >= 2
+        else:
+            has_substantive_bm25 = best_overlap >= 3 or (best_overlap >= 2 and best_overlap / len(query_tokens) >= 0.5)
+
+        if max_dense_score < cfg.min_relevance_threshold and not has_substantive_bm25:
+            logger.info(
+                "Abstention: max dense score %.3f below threshold %.3f without substantive BM25 hits.",
+                max_dense_score, cfg.min_relevance_threshold,
+            )
+            return result([], max_dense_score, True)
 
         # 4. Reciprocal Rank Fusion (RRF)
         rrf_scores: dict[str, float] = {}
-
-        # Add dense ranks
         for rank, res in enumerate(dense_results, start=1):
-            rrf_scores[res.chunk_id] = rrf_scores.get(res.chunk_id, 0.0) + (1.0 / (rrf_k + rank))
-
-        # Add BM25 ranks
+            rrf_scores[res.chunk_id] = rrf_scores.get(res.chunk_id, 0.0) + 1.0 / (cfg.rrf_k + rank)
         for rank, res in enumerate(bm25_results, start=1):
-            rrf_scores[res.chunk_id] = rrf_scores.get(res.chunk_id, 0.0) + (1.0 / (rrf_k + rank))
+            rrf_scores[res.chunk_id] = rrf_scores.get(res.chunk_id, 0.0) + 1.0 / (cfg.rrf_k + rank)
+        ranked_ids = sorted(rrf_scores, key=lambda cid: rrf_scores[cid], reverse=True)
 
-        # Sort candidate chunk IDs by fused RRF score descending
-        sorted_chunk_ids = sorted(rrf_scores.keys(), key=lambda cid: rrf_scores[cid], reverse=True)
-        top_chunk_ids = sorted_chunk_ids[:rerank_top_k]
-
-        # 5. Fetch and verify active chunks from registry (G3 Context Filter)
-        retained_chunks: list[DocumentChunk] = []
-        for cid in top_chunk_ids:
+        # 5. Keep chunks of active documents only (quarantined / deleting / failed docs never surface),
+        #    skipping near-duplicates (boilerplate repeated across pages with only numbers changed)
+        retained: list[DocumentChunk] = []
+        seen_texts: set[str] = set()
+        for cid in ranked_ids:
+            if len(retained) >= cfg.rerank_top_k:
+                break
             chunk = self.registry.get_chunk(cid)
             if chunk is None:
                 continue
+            signature = NEAR_DUPLICATE_RE.sub("#", chunk.text_content.lower())
+            if signature in seen_texts:
+                continue
             doc = self.registry.get_document(chunk.doc_id)
             if doc and doc.state == "active":
-                retained_chunks.append(chunk)
+                seen_texts.add(signature)
+                retained.append(chunk)
 
-        if not retained_chunks:
-            logger.info("Abstention triggered: no active chunks retained after filtering.")
-            return [], 0.0, True
+        if not retained:
+            logger.info("Abstention: no active chunks retained after fusion.")
+            return result([], 0.0, True)
 
-        keyword_score = 0.0
-        if has_substantive_bm25 and query_tokens:
-            keyword_score = min(1.0, round(best_overlap / max(1, len(query_tokens)), 2))
-        elif has_bm25:
-            keyword_score = min(1.0, round(float(len(retained_chunks)) / float(top_k_bm25), 2))
+        keyword_score = round(best_overlap / len(query_tokens), 2) if (has_substantive_bm25 and query_tokens) else 0.0
+        return result(retained, max(max_dense_score, min(1.0, keyword_score)), False)
 
-        effective_score = max(max_dense_score, keyword_score)
-        return retained_chunks, effective_score, False
+
+def corpus_overlap(registry: RegistryPort, query: str, top_k: int = 5) -> float:
+    """Best share of the query's content terms found in a single active chunk (BM25 candidates)."""
+    try:
+        hits = registry.search_bm25(query, top_k)
+    except StorageError:
+        return 0.0
+    return max((overlap_ratio(query, h.text) for h in hits), default=0.0)
