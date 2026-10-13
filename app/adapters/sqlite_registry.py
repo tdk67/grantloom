@@ -12,7 +12,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
 from app.core.errors import StorageError
-from app.ports.models import DocumentChunk, DocumentRecord, OutboxJob
+from app.ports.models import DocumentChunk, DocumentRecord, KeywordSearchResult, OutboxJob
 from app.ports.registry import RegistryPort
 
 logger = logging.getLogger("grantloom.adapters.sqlite_registry")
@@ -104,19 +104,29 @@ class SqliteRegistryAdapter(RegistryPort):
         except Exception as exc:
             raise StorageError(f"Failed to fetch document by hash '{content_hash}': {exc}") from exc
 
-    def list_documents(self) -> list[DocumentRecord]:
-        """List all registered documents sorted by newest created first."""
-        query = text("""
-            SELECT doc_id, filename, content_hash, file_type, page_count,
-                   state, version, file_path, error_message, metadata_json, created_at
-            FROM documents ORDER BY created_at DESC
-        """)
+    def list_documents(self, state: Optional[str] = None) -> list[DocumentRecord]:
+        """List all registered documents sorted by newest created first, optionally filtering by state."""
+        if state:
+            query = text("""
+                SELECT doc_id, filename, content_hash, file_type, page_count,
+                       state, version, file_path, error_message, metadata_json, created_at
+                FROM documents WHERE state = :state ORDER BY created_at DESC
+            """)
+            params = {"state": state}
+        else:
+            query = text("""
+                SELECT doc_id, filename, content_hash, file_type, page_count,
+                       state, version, file_path, error_message, metadata_json, created_at
+                FROM documents ORDER BY created_at DESC
+            """)
+            params = {}
         try:
             with self.engine.connect() as conn:
-                rows = conn.execute(query).mappings().fetchall()
+                rows = conn.execute(query, params).mappings().fetchall()
                 return [self._row_to_document_record(row) for row in rows]
         except Exception as exc:
             raise StorageError(f"Failed to list documents: {exc}") from exc
+
 
     def update_document_state(
         self,
@@ -368,6 +378,51 @@ class SqliteRegistryAdapter(RegistryPort):
                 )
         except Exception as exc:
             logger.warning("Failed to record audit event '%s': %s", event_type, exc)
+
+    def search_bm25(self, query: str, top_k: int = 10) -> list[KeywordSearchResult]:
+        """Perform full-text BM25 search over chunks_fts table."""
+        import re
+        from app.core.constants import ENGLISH_STOP_WORDS
+
+        raw_tokens = re.findall(r"\b[a-zA-Z0-9_\-]{2,}\b", query)
+        if not raw_tokens:
+            return []
+
+        tokens = [t for t in raw_tokens if t.lower() not in ENGLISH_STOP_WORDS]
+        if not tokens:
+            return []
+
+        match_query = " OR ".join(f'"{t}"' for t in tokens)
+        sql = text("""
+            SELECT f.chunk_id, f.doc_id, f.text_content, bm25(chunks_fts) as rank
+            FROM chunks_fts f
+            JOIN documents d ON d.doc_id = f.doc_id
+            WHERE chunks_fts MATCH :match_query AND d.state = 'active'
+            ORDER BY rank ASC
+            LIMIT :top_k
+        """)
+        try:
+            with self.engine.connect() as conn:
+                rows = conn.execute(sql, {"match_query": match_query, "top_k": top_k}).mappings().fetchall()
+                results: list[KeywordSearchResult] = []
+                for row in rows:
+                    raw_rank = float(row["rank"])
+                    # Negative BM25 score where more negative = higher relevance
+                    score = abs(raw_rank)
+                    results.append(
+                        KeywordSearchResult(
+                            chunk_id=row["chunk_id"],
+                            doc_id=row["doc_id"],
+                            score=score,
+                            text=row["text_content"],
+                            metadata={"bm25_rank": raw_rank},
+                        )
+                    )
+                return results
+        except Exception as exc:
+            logger.warning("BM25 FTS search failed for query '%s': %s", query, exc)
+            return []
+
 
     @staticmethod
     def _row_to_document_record(row: Any) -> DocumentRecord:

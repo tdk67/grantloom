@@ -41,6 +41,8 @@ class ExtractionResult:
     file_type: str
     page_count: int
     sections: list[ExtractedSection]
+    structured_sheets: dict[str, dict[str, Any]] = field(default_factory=dict)
+
 
 
 class DocumentExtractor:
@@ -175,6 +177,7 @@ class DocumentExtractor:
             wb = openpyxl.load_workbook(str(path), data_only=True)
             sections: list[ExtractedSection] = []
 
+            structured_sheets: dict[str, dict[str, Any]] = {}
             for sheet_name in wb.sheetnames:
                 ws = wb[sheet_name]
                 rows = list(ws.iter_rows(values_only=True))
@@ -193,6 +196,12 @@ class DocumentExtractor:
                         headers = [str(c or f"Col_{i+1}").strip() for i, c in enumerate(row)]
                     else:
                         data_rows.append((row_idx, list(row)))
+
+                if headers and data_rows:
+                    structured_sheets[sheet_name] = {
+                        "columns": headers,
+                        "rows": data_rows,
+                    }
 
                 if not data_rows and headers:
                     # Single header row with no data
@@ -248,6 +257,7 @@ class DocumentExtractor:
                 file_type="xlsx",
                 page_count=max(1, len(wb.sheetnames)),
                 sections=sections,
+                structured_sheets=structured_sheets,
             )
         except Exception as exc:
             raise ExtractionError(f"Failed to extract spreadsheet '{filename}': {exc}") from exc

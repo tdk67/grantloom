@@ -1,0 +1,23 @@
+# GrantLoom — AI Agent-Based Grant Intelligence & Decision Support System
+
+> GrantLoom is an academic RAG and grant compliance intelligence system for research labs and PIs.
+> It ingests funding solicitations (NOFOs, RFPs), past lab proposals, biosketches, and budgets.
+> It provides verifiable Q&A with 100% resolvable citations down to physical page/row coordinates,
+> AST-guarded tabular budget analysis, KùzuDB graph relationship traversal, and compliance matrices.
+
+## Core Capabilities
+- Verifiable Citations: Physical coordinates (file, page, sheet, row) with automatic keyword highlighting.
+- Guardrails: G1 Input injection filter, G2 Strategy router, G3 Context filter, G4 Output verification.
+- Tabular SQL Guard: AST parser enforcing read-only single SELECT, row limits, and table allow-listing.
+- KùzuDB Graph: Relationship traversal across documents, requirements, PIs, projects, and funders.
+- Compliance Matrix: Cross-references NOFO requirements and exports formatted .xlsx workbooks.
+- Zero Cloud Secrets: BYOK client-side IndexedDB storage or local private Ollama inference.
+
+## Key API Endpoints
+- POST /api/v1/documents: Upload and index grant documents (PDF, TXT, XLSX).
+- GET /api/v1/documents/{id}: Poll document state and chunks.
+- POST /api/v1/ask: Stream canonical SSE reasoning events and verified answers.
+- POST /api/v1/compliance/{solicitation_id}: Evaluate compliance matrix.
+- GET /api/v1/compliance/{solicitation_id}/export: Download styled Excel workbook.
+- GET /api/v1/examples: Curated starter prompts.
+- POST /api/v1/admin/generate-synthetic-data: Generate high-fidelity demo grant dataset.

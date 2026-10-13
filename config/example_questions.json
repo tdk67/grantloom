@@ -1,0 +1,37 @@
+[
+  {
+    "id": "ex_cost_match",
+    "category": "Compliance & Eligibility",
+    "question": "What is the mandatory non-federal cost match percentage and equipment threshold?",
+    "strategy_hint": "hybrid",
+    "description": "Cross-references DOE solicitation requirements for cost share and equipment thresholds."
+  },
+  {
+    "id": "ex_pi_eligibility",
+    "category": "Key Personnel",
+    "question": "Is Dr. Elena Vance eligible to serve as Principal Investigator?",
+    "strategy_hint": "graph",
+    "description": "Verifies PI eligibility and institution credentials from solicitations and past lab proposals."
+  },
+  {
+    "id": "ex_budget_travel",
+    "category": "Budget Tabular",
+    "question": "What is the total travel budget and how is it distributed across trips?",
+    "strategy_hint": "structured",
+    "description": "Queries tabular spreadsheet data from the Lab Budget workbook."
+  },
+  {
+    "id": "ex_personnel_effort",
+    "category": "Budget Tabular",
+    "question": "What is the total personnel salary and what level of effort is committed by the postdoc?",
+    "strategy_hint": "structured",
+    "description": "Extracts personnel effort months and salary totals from the budget sheet."
+  },
+  {
+    "id": "ex_past_performance",
+    "category": "Prior Experience",
+    "question": "What prior publications and DOE awards support our perovskite solar research?",
+    "strategy_hint": "hybrid",
+    "description": "Extracts prior track record and facilities evidence from past lab proposals."
+  }
+]

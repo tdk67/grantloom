@@ -48,7 +48,13 @@ class IngestionService:
             self.upload_dir = Path(upload_dir)
         self.upload_dir.mkdir(parents=True, exist_ok=True)
 
+    def upload_document(self, filename: str, file_bytes: bytes) -> IngestionUploadResult:
+        """Convenience method accepting raw bytes."""
+        import io
+        return self.process_upload(filename=filename, stream=io.BytesIO(file_bytes), content_length=len(file_bytes))
+
     def process_upload(
+
         self,
         filename: str,
         stream: BinaryIO,

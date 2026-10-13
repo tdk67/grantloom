@@ -104,19 +104,26 @@ def test_budget_xlsx_sheets_and_formulas(temp_output_dir: Path):
 
     # Inspect Travel sheet
     ws_travel = wb["Travel"]
-    # Row 5 is total row in Travel sheet
-    assert ws_travel.cell(row=5, column=1).value == "Travel Subtotal"
-    assert ws_travel.cell(row=5, column=8).value == "=SUM(H2:H4)"
+    travel_subtotal_row = next(
+        (r for r in range(2, ws_travel.max_row + 1) if ws_travel.cell(row=r, column=1).value == "Travel Subtotal"),
+        None,
+    )
+    assert travel_subtotal_row is not None
+    assert ws_travel.cell(row=travel_subtotal_row, column=8).value == f"=SUM(H2:H{travel_subtotal_row - 1})"
 
     # Inspect Equipment sheet
     ws_equip = wb["Equipment"]
-    assert ws_equip.cell(row=5, column=1).value == "Equipment Subtotal"
-    assert ws_equip.cell(row=5, column=5).value == "=SUM(E2:E4)"
+    equip_subtotal_row = next(
+        (r for r in range(2, ws_equip.max_row + 1) if ws_equip.cell(row=r, column=1).value == "Equipment Subtotal"),
+        None,
+    )
+    assert equip_subtotal_row is not None
+    assert ws_equip.cell(row=equip_subtotal_row, column=5).value == f"=SUM(E2:E{equip_subtotal_row - 1})"
 
     # Load with data_only=True or verify item values
     wb_val = openpyxl.load_workbook(str(budget_path), data_only=True)
     ws_equip_val = wb_val["Equipment"]
-    # Unit costs: $18,000, $32,000, $18,000 (rows 2, 3, 4)
+    # Unit costs for baseline equipment items (rows 2, 3, 4)
     unit_costs = [ws_equip_val.cell(row=r, column=4).value for r in range(2, 5)]
     assert unit_costs == [18000, 32000, 18000]
     # Assert none exceed $50,000

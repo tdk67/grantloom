@@ -92,3 +92,35 @@ class GateVerdict:
     confidence: float
     reason: str
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class KeywordSearchResult:
+    chunk_id: str
+    doc_id: str
+    score: float
+    text: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class CitationCoordinate:
+    chunk_id: str
+    doc_id: str
+    filename: str
+    page: Optional[int] = None
+    line: Optional[str] = None
+    sheet: Optional[str] = None
+    row: Optional[str] = None
+    excerpt: str = ""
+    verified: bool = True
+
+
+@dataclass
+class AskResponse:
+    answer: str
+    citations: list[CitationCoordinate] = field(default_factory=list)
+    confidence_score: float = 0.0
+    abstention: bool = False
+    strategy: str = "hybrid"
+

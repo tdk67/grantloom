@@ -1,0 +1,1 @@
+Your query was flagged by the security guardrail as a potential system prompt injection or policy violation.

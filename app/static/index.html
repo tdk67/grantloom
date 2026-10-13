@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GrantLoom — Verifiable RAG & Grant Compliance Engine</title>
+  <meta name="description" content="Self-hosted RAG appliance for academic research labs. Cross-references funding solicitations with institutional documents using verifiable citations and compliance matrices.">
+  <meta name="keywords" content="academic RAG, grant compliance, NOFO analysis, NIH R01 audit, verifiable citations, Kuzu graph, ChromaDB">
+  <link rel="canonical" href="http://localhost:8000/">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <!-- WCAG Skip to Main Content Link -->
+  <a href="#main-content" class="skip-link">Skip to main content</a>
+
+  <!-- Top Navigation Header -->
+  <header class="app-header" role="banner">
+    <div class="header-brand">
+      <div class="logo-badge" aria-hidden="true">🧶</div>
+      <div>
+        <h1 class="logo-title">GrantLoom</h1>
+        <span class="logo-subtitle">Academic Intelligence Engine</span>
+      </div>
+    </div>
+
+    <div class="header-actions">
+      <div id="provider-badge" class="status-chip chip-warning" role="status" aria-live="polite">
+        <span class="dot"></span>
+        <span id="provider-status-text">No API Key Configured</span>
+      </div>
+      <button id="btn-generate-demo" class="btn btn-secondary" title="Generate sample grant dataset">
+        <span>🪄 Generate Demo Data</span>
+      </button>
+      <button id="btn-open-settings" class="btn btn-secondary" aria-haspopup="dialog" aria-controls="settings-modal">
+        <span>⚙️ Settings</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <div class="app-layout">
+    <!-- Left Sidebar -->
+    <aside class="app-sidebar" role="navigation" aria-label="Main Navigation">
+      <nav class="nav-tabs" role="tablist">
+        <button id="tab-documents" class="nav-tab active" role="tab" aria-selected="true" aria-controls="view-documents">
+          <span class="tab-icon">📄</span>
+          <span>Documents</span>
+          <span id="doc-count-badge" class="badge">0</span>
+        </button>
+        <button id="tab-qa" class="nav-tab" role="tab" aria-selected="false" aria-controls="view-qa">
+          <span class="tab-icon">💬</span>
+          <span>Research Q&A</span>
+        </button>
+        <button id="tab-compliance" class="nav-tab" role="tab" aria-selected="false" aria-controls="view-compliance">
+          <span class="tab-icon">📊</span>
+          <span>Compliance Matrix</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-section">
+        <h2 class="sidebar-title">Curated Starter Prompts</h2>
+        <div id="starter-prompts-list" class="starter-prompts" role="list">
+          <div class="prompt-placeholder">Loading starter prompts...</div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Workspace Content -->
+    <main id="main-content" class="app-workspace" tabindex="-1">
+
+      <!-- Lockout Alert Banner -->
+      <div id="lockout-banner" class="alert-banner" role="alert">
+        <span class="alert-icon">⚠️</span>
+        <div class="alert-content">
+          <strong>API Key Required:</strong> Ingestion and reasoning are locked until a verified OpenRouter key or Ollama endpoint is configured in Settings.
+        </div>
+        <button id="btn-banner-settings" class="btn btn-sm btn-primary">Configure Now</button>
+      </div>
+
+      <!-- VIEW 1: Documents -->
+      <section id="view-documents" class="workspace-view active" role="tabpanel" aria-labelledby="tab-documents">
+        <div class="view-header">
+          <div>
+            <h2>Document Ingestion & Repository</h2>
+            <p class="view-desc">Ingest funding solicitations (NOFOs), past lab proposals, and XLSX budget sheets.</p>
+          </div>
+          <button id="btn-refresh-docs" class="btn btn-secondary btn-sm">🔄 Refresh</button>
+        </div>
+
+        <!-- Upload Dropzone -->
+        <div id="dropzone" class="dropzone" role="region" aria-label="File Upload Dropzone" tabindex="0">
+          <input type="file" id="file-input" class="file-input" accept=".pdf,.txt,.xlsx,.xls" multiple aria-label="Upload document files">
+          <div class="dropzone-content">
+            <span class="dropzone-icon">📁</span>
+            <h3>Drag & Drop documents here, or <span class="browse-link">browse</span></h3>
+            <p>Supports PDF (text layer & tables), plain text, and Excel spreadsheets (up to 25MB)</p>
+          </div>
+        </div>
+
+        <!-- Ingestion Progress Container -->
+        <div id="ingest-progress-container" class="progress-container hidden" role="status" aria-live="polite">
+          <div class="progress-bar-wrap">
+            <div id="ingest-progress-bar" class="progress-bar" style="width: 0%"></div>
+          </div>
+          <div class="progress-info">
+            <span id="progress-stage-text">Processing document...</span>
+            <span id="progress-percent-text">0%</span>
+          </div>
+        </div>
+
+        <!-- Document Table -->
+        <div class="table-card">
+          <table class="data-table" aria-label="Indexed Documents Table">
+            <thead>
+              <tr>
+                <th>File Name</th>
+                <th>Type</th>
+                <th>Pages / Sheets</th>
+                <th>Status</th>
+                <th>Date Added</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="documents-table-body">
+              <tr>
+                <td colspan="6" class="empty-state">No documents indexed yet. Upload a document or click "Generate Demo Data" above.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- VIEW 2: Research Q&A -->
+      <section id="view-qa" class="workspace-view hidden" role="tabpanel" aria-labelledby="tab-qa">
+        <div class="view-header">
+          <div>
+            <h2>Citation-Verified Research Q&A</h2>
+            <p class="view-desc">Ask complex questions cross-referencing solicitations and lab capability records.</p>
+          </div>
+        </div>
+
+        <!-- Live SSE Reasoning Status Trail -->
+        <div id="reasoning-trail" class="reasoning-trail hidden" role="status" aria-live="polite">
+          <div id="pill-guard" class="trail-pill"><span>1. Guard</span></div>
+          <div id="pill-route" class="trail-pill"><span>2. Route</span></div>
+          <div id="pill-retrieve" class="trail-pill"><span>3. Retrieve</span></div>
+          <div id="pill-generate" class="trail-pill"><span>4. Generate</span></div>
+          <div id="pill-verify" class="trail-pill"><span>5. Verify Citations</span></div>
+        </div>
+
+        <!-- Q&A Transcript -->
+        <div id="chat-transcript" class="chat-transcript" role="log" aria-live="polite">
+          <div class="chat-welcome">
+            <div class="welcome-icon">🔍</div>
+            <h3>Ground-Truth Grant Reasoning</h3>
+            <p>Every statement is verified against indexed chunks with physical page coordinates. Click on any citation badge to inspect the original text.</p>
+          </div>
+        </div>
+
+        <!-- Input Area -->
+        <div class="chat-input-card">
+          <form id="chat-form" class="chat-form">
+            <textarea id="chat-input" class="chat-textarea" placeholder="Ask a grant question (e.g. 'What is the travel budget total?' or 'Is Dr. Elena Vance eligible as PI?')" rows="3" required></textarea>
+            <div class="chat-form-footer">
+              <span class="keyboard-hint">Press <strong>Enter</strong> to submit, <strong>Shift+Enter</strong> for newline</span>
+              <button type="submit" id="btn-submit-ask" class="btn btn-primary">
+                <span>Submit Query 🚀</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <!-- VIEW 3: Compliance Matrix -->
+      <section id="view-compliance" class="workspace-view hidden" role="tabpanel" aria-labelledby="tab-compliance">
+        <div class="view-header">
+          <div>
+            <h2>NOFO Compliance & Gap Matrix</h2>
+            <p class="view-desc">Automatic extraction of mandatory solicitation requirements cross-referenced with lab records.</p>
+          </div>
+          <div class="header-buttons">
+            <button id="btn-export-excel" class="btn btn-primary">
+              <span>📥 Export to Excel (.xlsx)</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Solicitation Selector -->
+        <div class="compliance-controls-card">
+          <div class="control-group">
+            <label for="select-solicitation">Select Target Solicitation:</label>
+            <select id="select-solicitation" class="form-select">
+              <option value="">-- Choose active solicitation --</option>
+            </select>
+          </div>
+          <button id="btn-run-compliance" class="btn btn-secondary">
+            <span>Audit Compliance</span>
+          </button>
+        </div>
+
+        <!-- Readiness Scorecard -->
+        <div id="readiness-card" class="readiness-card hidden">
+          <div class="readiness-metric">
+            <div class="metric-circle">
+              <span id="readiness-score">--</span>
+              <span class="metric-label">Readiness</span>
+            </div>
+            <div class="metric-summary">
+              <h3 id="readiness-headline">Audit Results</h3>
+              <p id="readiness-breakdown">Calculating gap breakdown...</p>
+              <span class="readiness-disclaimer">Estimates based strictly on indexed lab documents. Not an official legal guarantee.</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Compliance Matrix Table -->
+        <div class="table-card">
+          <table class="data-table" aria-label="Compliance Matrix Table">
+            <thead>
+              <tr>
+                <th style="width: 10%">Req ID</th>
+                <th style="width: 20%">Category</th>
+                <th style="width: 35%">Requirement Title & Description</th>
+                <th style="width: 15%">Status</th>
+                <th style="width: 20%">Lab Evidence & Verification</th>
+              </tr>
+            </thead>
+            <tbody id="compliance-table-body">
+              <tr>
+                <td colspan="5" class="empty-state">Select a solicitation and click "Audit Compliance" to evaluate mandatory requirements.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- VIEW 4: Slide-Over Citation Drawer -->
+  <aside id="citation-drawer" class="citation-drawer hidden" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
+    <div class="drawer-header">
+      <div>
+        <h3 id="drawer-title">Source Citation Coordinate</h3>
+        <span id="drawer-subtitle" class="drawer-subtitle">Document Excerpt</span>
+      </div>
+      <button id="btn-close-drawer" class="btn-icon" aria-label="Close drawer">✕</button>
+    </div>
+    <div class="drawer-body">
+      <div class="drawer-meta-card">
+        <div class="meta-row"><span class="meta-label">Document:</span> <span id="drawer-filename">--</span></div>
+        <div class="meta-row"><span class="meta-label">Location:</span> <span id="drawer-coord">--</span></div>
+        <div class="meta-row"><span class="meta-label">Chunk ID:</span> <span id="drawer-chunk-id">--</span></div>
+      </div>
+      <div class="drawer-excerpt-card">
+        <h4>Indexed Excerpt:</h4>
+        <div id="drawer-excerpt-text" class="drawer-text"></div>
+      </div>
+    </div>
+  </aside>
+  <div id="drawer-backdrop" class="backdrop hidden"></div>
+
+  <!-- VIEW 5: Settings & Credential Modal -->
+  <div id="settings-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="modal-title">⚙️ Workspace Settings & Credentials</h3>
+        <button id="btn-close-settings" class="btn-icon" aria-label="Close settings">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="settings-tabs" role="tablist">
+          <button id="tab-provider-openrouter" class="subtab active" role="tab" aria-selected="true">OpenRouter Cloud (BYOK)</button>
+          <button id="tab-provider-ollama" class="subtab" role="tab" aria-selected="false">Local Ollama</button>
+        </div>
+
+        <!-- OpenRouter Panel -->
+        <div id="panel-openrouter" class="settings-panel">
+          <div class="form-group">
+            <label for="input-openrouter-key">OpenRouter API Key:</label>
+            <div class="input-with-button">
+              <input type="password" id="input-openrouter-key" class="form-input" placeholder="sk-or-v1-...">
+              <button type="button" id="btn-toggle-key-visibility" class="btn btn-sm btn-secondary">Show</button>
+            </div>
+            <p class="form-hint">Stored securely in browser IndexedDB. Never saved on disk in source files.</p>
+          </div>
+          <div class="panel-actions">
+            <button id="btn-test-key" class="btn btn-secondary">Probe API Key</button>
+            <span id="key-probe-result" class="probe-result"></span>
+          </div>
+        </div>
+
+        <!-- Ollama Panel -->
+        <div id="panel-ollama" class="settings-panel hidden">
+          <div class="form-group">
+            <label for="input-ollama-url">Ollama Base URL:</label>
+            <input type="text" id="input-ollama-url" class="form-input" value="http://localhost:11434">
+          </div>
+          <div class="form-group">
+            <label for="select-ollama-model">Model:</label>
+            <div class="input-with-button">
+              <select id="select-ollama-model" class="form-select">
+                <option value="llama3.1:8b">llama3.1:8b</option>
+                <option value="mistral:7b">mistral:7b</option>
+                <option value="qwen2.5:7b">qwen2.5:7b</option>
+              </select>
+              <button type="button" id="btn-probe-ollama" class="btn btn-sm btn-secondary">Refresh</button>
+            </div>
+          </div>
+          <div class="panel-actions">
+            <button id="btn-test-ollama-tool" class="btn btn-secondary">Test Tool Calling</button>
+            <span id="ollama-probe-result" class="probe-result"></span>
+          </div>
+        </div>
+
+        <hr class="divider">
+
+        <!-- Demo Data Trigger -->
+        <div class="demo-section">
+          <h4>Demo Grant Workspace</h4>
+          <p>Generate high-fidelity sample documents (DOE Solar 2026 NOFO, Past Lab Proposal, Budget XLSX).</p>
+          <button id="btn-modal-demo-data" class="btn btn-secondary">🪄 Populate Demo Documents</button>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button id="btn-cancel-settings" class="btn btn-secondary">Cancel</button>
+        <button id="btn-save-settings" class="btn btn-primary">Save Settings</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

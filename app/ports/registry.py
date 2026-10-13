@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, Optional, Sequence
 
-from app.ports.models import DocumentChunk, DocumentRecord, OutboxJob
+from app.ports.models import DocumentChunk, DocumentRecord, KeywordSearchResult, OutboxJob
 
 
 class RegistryPort(ABC):
@@ -27,9 +27,10 @@ class RegistryPort(ABC):
         ...
 
     @abstractmethod
-    def list_documents(self) -> list[DocumentRecord]:
-        """List all registered documents."""
+    def list_documents(self, state: Optional[str] = None) -> list[DocumentRecord]:
+        """List all registered documents, optionally filtered by state."""
         ...
+
 
     @abstractmethod
     def update_document_state(
@@ -92,3 +93,9 @@ class RegistryPort(ABC):
     def get_chunk(self, chunk_id: str) -> Optional[DocumentChunk]:
         """Fetch single chunk by chunk ID."""
         ...
+
+    @abstractmethod
+    def search_bm25(self, query: str, top_k: int = 10) -> list[KeywordSearchResult]:
+        """Perform full-text BM25 search over indexed chunks."""
+        ...
+

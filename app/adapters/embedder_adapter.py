@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 from typing import Optional, Sequence
 
 import httpx
 
+from app.core.constants import ENGLISH_STOP_WORDS
 from app.core.errors import LLMInferenceError
 from app.ports.embedder import EmbedderPort
 
@@ -16,6 +18,8 @@ class DeterministicEmbedder(EmbedderPort):
     """Deterministic, zero-dependency embedder generating fixed-dimension dense vectors.
     
     Used for local testing, integration benchmarks, and environments without active LLM keys.
+    Uses token-level feature hashing to preserve semantic token overlap and produce
+    near-orthogonal vectors for out-of-domain queries.
     """
 
     def __init__(self, dimension: int = 1536) -> None:
@@ -28,20 +32,27 @@ class DeterministicEmbedder(EmbedderPort):
         return [self._compute_deterministic_vector(t) for t in texts]
 
     def _compute_deterministic_vector(self, text: str) -> list[float]:
-        # Hash text and generate pseudo-random unit-normalized vector
-        seed_hash = hashlib.sha256(text.encode("utf-8")).digest()
-        seed_int = int.from_bytes(seed_hash[:8], byteorder="big")
-        
-        vec = []
-        norm_sq = 0.0
-        for i in range(self.dimension):
-            # Generate deterministic pseudo-random float
-            val = math.sin((seed_int + i) * 12.9898) * 43758.5453
-            val = val - math.floor(val) - 0.5
-            vec.append(val)
-            norm_sq += val * val
+        raw_tokens = re.findall(r"\b[a-zA-Z0-9_\-]{2,}\b", text.lower())
+        tokens = [t for t in raw_tokens if t not in ENGLISH_STOP_WORDS]
+        if not tokens:
+            return [0.0] * self.dimension
 
-        norm = math.sqrt(norm_sq) if norm_sq > 0 else 1.0
+        features = list(tokens)
+        if len(tokens) > 1:
+            features.extend(f"{tokens[i]}_{tokens[i+1]}" for i in range(len(tokens) - 1))
+
+        vec = [0.0] * self.dimension
+        for feat in features:
+            h = int(hashlib.md5(feat.encode("utf-8")).hexdigest(), 16)
+            for k in range(4):
+                idx = (h >> (k * 12)) % self.dimension
+                sign = 1.0 if ((h >> (k * 12 + 11)) & 1) else -1.0
+                vec[idx] += sign
+
+        norm_sq = sum(v * v for v in vec)
+        if norm_sq <= 0.0:
+            return [0.0] * self.dimension
+        norm = math.sqrt(norm_sq)
         return [round(v / norm, 6) for v in vec]
 
 

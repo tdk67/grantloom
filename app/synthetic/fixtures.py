@@ -427,8 +427,10 @@ def build_lab_budget_specs() -> List[SheetSpec]:
         ["Senior Firmware Engineer", "Marcus Holloway", 110000, 0.50, 0.28, "=C3*D3*E3", "=C3*D3+F3"],
         ["Community Equity Lead", "Dr. Aisha Patel", 95000, 0.15, 0.28, "=C4*D4*E4", "=C4*D4+F4"],
         ["Graduate Student Researcher", "TBD (JHU Fellow)", 45000, 0.50, 0.10, "=C5*D5*E5", "=C5*D5+F5"],
+        ["Postdoctoral Scholar", "Alex Mercer", 65000, 1.0, 0.28, "=C6*D6*E6", "=C6*D6+F6"],
+        ["Graduate Student", "Samira Khan", 32000, 0.50, 0.10, "=C7*D7*E7", "=C7*D7+F7"],
     ]
-    personnel_total = ["Personnel Subtotal", "", "", "", "", "=SUM(F2:F5)", "=SUM(G2:G5)"]
+    personnel_total = ["Personnel Subtotal", "", "", "", "", "=SUM(F2:F7)", "=SUM(G2:G7)"]
     personnel_formats = {3: "$#,##0", 4: "0.0%", 5: "0.0%", 6: "$#,##0", 7: "$#,##0"}
     sheets.append(
         SheetSpec(
@@ -456,8 +458,10 @@ def build_lab_budget_specs() -> List[SheetSpec]:
         ["Washington, DC (DOE Annual Peer Review)", "Required Annual Project Presentation", 2, 3, 1200, 2050, 600, "=E2+F2+G2"],
         ["Denver, CO (IEEE PES General Meeting)", "Disseminate Inverter Research Papers", 2, 4, 1600, 2200, 800, "=E3+F3+G3"],
         ["Baltimore & Annapolis, MD (Field Sites)", "Bi-Weekly Community Field Inspections", 2, 12, 1800, 2200, 0, "=E4+F4+G4"],
+        ["Austin, TX (IEEE PVSC Conference)", "Annual Photovoltaic Specialists Conference", 3, 4, 1800, 2400, 0, "=E5+F5+G5"],
+        ["Nevada Solar Test Site (Site Visit)", "Field Testing Site Visit", 1, 3, 800, 700, 0, "=E6+F6+G6"],
     ]
-    travel_total = ["Travel Subtotal", "", "", "", "=SUM(E2:E4)", "=SUM(F2:F4)", "=SUM(G2:G4)", "=SUM(H2:H4)"]
+    travel_total = ["Travel Subtotal", "", "", "", "=SUM(E2:E6)", "=SUM(F2:F6)", "=SUM(G2:G6)", "=SUM(H2:H6)"]
     travel_formats = {5: "$#,##0", 6: "$#,##0", 7: "$#,##0", 8: "$#,##0"}
     sheets.append(
         SheetSpec(
@@ -483,8 +487,10 @@ def build_lab_budget_specs() -> List[SheetSpec]:
         ["High-Precision Power Quality Analyzer", "Chroma 66205", 1, 18000, "=C2*D2", "No ($18,000)"],
         ["Bi-Directional DC Power Supply (15kW)", "Magna-Power XR Series", 1, 32000, "=C3*D3", "No ($32,000)"],
         ["High-Voltage Isolation Test Enclosure", "Custom Faraday RF-Shield", 1, 18000, "=C4*D4", "No ($18,000)"],
+        ["Solar Simulator Spectrometer", "Sciencetech Class AAA", 1, 55000, "=C5*D5", "Yes ($55,000)"],
+        ["IV Characterization Station", "Keithley 2400 SourceMeter", 1, 28000, "=C6*D6", "No ($28,000)"],
     ]
-    equip_total = ["Equipment Subtotal", "", "=SUM(C2:C4)", "", "=SUM(E2:E4)", "All items < $50,000"]
+    equip_total = ["Equipment Subtotal", "", "=SUM(C2:C6)", "", "=SUM(E2:E6)", "All items < $50,000"]
     equip_formats = {4: "$#,##0", 5: "$#,##0"}
     sheets.append(
         SheetSpec(

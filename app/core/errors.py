@@ -179,3 +179,16 @@ class DocumentNotFoundError(NotFoundError):
     default_status = 404
     default_title = "Document Not Found"
     default_code = ErrorCode.DOC_NOT_FOUND
+
+
+class SqlGuardError(GrantLoomError):
+    default_status = 400
+    default_title = "SQL Guard Violation"
+    default_code = ErrorCode.SQL_GUARD_VIOLATION
+
+
+class ComplianceError(GrantLoomError):
+    default_status = 400
+    default_title = "Compliance Matrix Failure"
+    default_code = ErrorCode.VALIDATION_ERROR
+
