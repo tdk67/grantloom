@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Optional
+import json
+from typing import AsyncIterator, Optional
 
 from fastapi import APIRouter, Depends, Header, Request, Response
+from fastapi.responses import StreamingResponse
 
 from app.api.deps import get_compliance_service, get_inference_profile, verify_master_api_key
 from app.core.rate_limit import compliance_limit, limiter
@@ -26,6 +28,32 @@ async def evaluate_compliance(
     """Extract solicitation requirements, assess lab evidence with the decision backend, persist and return the matrix."""
     api_key = await profile.authorize(x_openrouter_key)
     return await service.evaluate_solicitation(solicitation_id, api_key)
+
+
+@router.post("/{solicitation_id}/stream")
+@limiter.limit(compliance_limit)
+async def evaluate_compliance_stream(
+    request: Request,
+    solicitation_id: str,
+    x_openrouter_key: Optional[str] = Header(None, alias="X-OpenRouter-Key"),
+    profile: InferenceProfile = Depends(get_inference_profile),
+    service: ComplianceService = Depends(get_compliance_service),
+) -> StreamingResponse:
+    """SSE variant of the evaluation: `start` -> `progress` (per requirement) -> `done` (full matrix).
+
+    Gives the UI a real progress bar instead of a multi-minute blind wait.
+    """
+    api_key = await profile.authorize(x_openrouter_key)
+
+    async def sse_event_stream() -> AsyncIterator[str]:
+        async for event_type, data in service.evaluate_solicitation_stream(solicitation_id, api_key):
+            yield f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+
+    return StreamingResponse(
+        sse_event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/{solicitation_id}")

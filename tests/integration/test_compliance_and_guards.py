@@ -14,7 +14,7 @@ from app.adapters.decision_backends import FallbackDecisionBackend, HeuristicDec
 from app.core.metrics import DECISION_FALLBACKS
 from app.ports.models import DocumentChunk
 from app.services.guardrails import ContextFilter, IngestionScanner
-from tests.helpers import ScriptedLLM, make_pdf
+from tests.helpers import ScriptedLLM, make_pdf, parse_sse
 
 
 def _client(app) -> httpx.AsyncClient:
@@ -178,6 +178,34 @@ async def test_compliance_matrix_extracts_document_requirements_and_exports(stac
     ws = openpyxl.load_workbook(io.BytesIO(export.content))["Compliance Matrix"]
     assert ws.cell(row=1, column=1).value == "Req ID"
     assert ws.cell(row=2, column=4).value in ("Satisfied", "Partial", "Gap")
+
+
+@pytest.mark.asyncio
+async def test_compliance_stream_reports_progress_and_completes(stack, tmp_path):
+    """The SSE variant streams start -> progress per requirement -> done with the full matrix."""
+    sol_id = await stack.ingest_bytes("FOA.pdf", make_pdf(tmp_path / "FOA.pdf", SOLICITATION).read_bytes())
+    await stack.ingest_bytes("Lab.pdf", make_pdf(tmp_path / "Lab.pdf", LAB).read_bytes())
+
+    async with _client(stack.app()) as client:
+        resp = await client.post(
+            f"/api/v1/compliance/{sol_id}/stream", headers={"X-OpenRouter-Key": "sk-valid-openrouter-key"}
+        )
+    assert resp.status_code == 200 and "text/event-stream" in resp.headers["content-type"]
+    events = parse_sse(resp.text)
+    names = [name for name, _ in events]
+    assert names[0] == "start" and names[-1] == "done"
+    assert names.count("progress") == 6
+
+    start = events[0][1]
+    assert start["total_requirements"] == 6 and start["solicitation_id"] == sol_id
+    evaluated = [data["evaluated"] for name, data in events if name == "progress"]
+    assert evaluated == [1, 2, 3, 4, 5, 6]  # completion counter, never out of order
+    assert all(data["status"] in ("Satisfied", "Partial", "Gap") for name, data in events if name == "progress")
+
+    done = events[-1][1]
+    assert done["total_requirements"] == 6
+    assert done["readiness_score_pct"] > 0
+    assert stack.registry.list_requirements(sol_id)  # persisted exactly like the JSON variant
 
 
 @pytest.mark.asyncio

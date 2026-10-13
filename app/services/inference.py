@@ -37,11 +37,18 @@ logger = logging.getLogger("grantloom.services.inference")
 
 
 class ValidatedKeyCache:
-    """Remembers recently validated BYOK keys by SHA-256 digest only (the key itself is never stored),
-    so the live auth probe does not add a provider round-trip to every request."""
+    """Remembers validated BYOK keys by SHA-256 digest only (the key itself is never stored).
 
-    def __init__(self, ttl_seconds: int) -> None:
+    D28: validation happens once — when the user saves their key in the UI (POST
+    /api/v1/auth/validate-key) or on the first request that carries it. `ttl_seconds <= 0`
+    means the entry is valid for the process lifetime (an upstream 401/402 during a real
+    call still surfaces immediately). The cache is FIFO-capped so a public deployment
+    cannot grow it without bound.
+    """
+
+    def __init__(self, ttl_seconds: int, max_entries: int) -> None:
         self.ttl_seconds = ttl_seconds
+        self.max_entries = max(1, max_entries)
         self._expiry: dict[str, float] = {}
 
     @staticmethod
@@ -49,11 +56,19 @@ class ValidatedKeyCache:
         return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
     def is_fresh(self, key: str) -> bool:
-        return self._expiry.get(self._digest(key), 0.0) > time.monotonic()
+        digest = self._digest(key)
+        if digest not in self._expiry:
+            return False
+        if self.ttl_seconds <= 0:
+            return True
+        return self._expiry[digest] > time.monotonic()
 
     def remember(self, key: str) -> None:
-        if self.ttl_seconds > 0:
-            self._expiry[self._digest(key)] = time.monotonic() + self.ttl_seconds
+        digest = self._digest(key)
+        self._expiry.pop(digest, None)
+        self._expiry[digest] = time.monotonic() + self.ttl_seconds if self.ttl_seconds > 0 else 0.0
+        while len(self._expiry) > self.max_entries:
+            self._expiry.pop(next(iter(self._expiry)))
 
 
 @dataclass(frozen=True)
@@ -128,7 +143,7 @@ def build_inference_profile(settings: Settings) -> InferenceProfile:
         writer_model=settings.models.writer_model,
         judge_model=settings.models.judge_model,
         embedding_description=describe_embeddings(settings),
-        key_cache=ValidatedKeyCache(settings.llm.byok_validation_ttl_seconds),
+        key_cache=ValidatedKeyCache(settings.llm.byok_validation_ttl_seconds, settings.llm.byok_validated_keys_max),
     )
 
 

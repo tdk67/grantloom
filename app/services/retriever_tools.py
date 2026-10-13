@@ -148,15 +148,41 @@ class StructuredQueryTool:
         )
 
     def _provenance(self, used: list[TableInfo], rows: list[dict[str, Any]]) -> list[DocumentChunk]:
+        """Chunks behind a SQL result: row-number matches first; for computed/aggregate results
+        (no row numbers) the chunks whose text actually contains the result values, so a citation
+        for e.g. a SUM shows the amount it came from."""
         row_numbers = {int(r["row_number"]) for r in rows if isinstance(r.get("row_number"), int)}
-        chunks: list[DocumentChunk] = []
+        values = self._result_values(rows)
+        row_matches: list[DocumentChunk] = []
+        value_matches: list[DocumentChunk] = []
         for table in used:
             for chunk in self.registry.get_chunks_for_document(table.doc_id):
                 if chunk.sheet_name != table.sheet_name or chunk.row_start is None:
                     continue
-                if not row_numbers or any(chunk.row_start <= n <= (chunk.row_end or chunk.row_start) for n in row_numbers):
-                    chunks.append(chunk)
-        return chunks[: self.max_chunks]
+                if row_numbers and any(chunk.row_start <= n <= (chunk.row_end or chunk.row_start) for n in row_numbers):
+                    row_matches.append(chunk)
+                elif values and any(v in chunk.text_content for v in values):
+                    value_matches.append(chunk)
+        return (row_matches or value_matches)[: self.max_chunks]
+
+    @staticmethod
+    def _result_values(rows: list[dict[str, Any]]) -> set[str]:
+        """Plain and thousands-separated renderings of numeric results (values < 100 are skipped:
+        they are counts, not identifying amounts, and would match almost any chunk)."""
+        values: set[str] = set()
+        for row in rows:
+            for key, v in row.items():
+                if key == "row_number" or isinstance(v, bool) or not isinstance(v, (int, float)):
+                    continue
+                if float(v) == int(v):
+                    n = abs(int(v))
+                    if n >= 100:
+                        values.add(str(int(v)))
+                        values.add(f"{int(v):,}")
+                elif abs(v) >= 100:
+                    values.add(f"{v:g}")
+                    values.add(f"{v:,.2f}".rstrip("0").rstrip("."))
+        return values
 
 
 class GraphQueryTool:

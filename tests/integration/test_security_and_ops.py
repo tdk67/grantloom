@@ -7,10 +7,11 @@ import pytest
 
 from app.adapters.chroma_adapter import ChromaVectorStoreAdapter, EmbeddingSpaceMismatchError
 from app.adapters.embedder_adapter import DeterministicEmbedder
+from app.api import deps
 from app.core.config import SecretsConfig
 from app.ports.models import ChunkVector
 from app.services.startup_checks import StartupCheckError, run_startup_checks
-from tests.helpers import ScriptedLLM, make_settings
+from tests.helpers import VALID_KEY, ScriptedLLM, make_settings
 
 MASTER = "test-master-key"
 
@@ -25,6 +26,8 @@ PROTECTED = [
     ("GET", "/api/v1/examples"),
     ("POST", "/api/v1/admin/generate-synthetic-data"),
     ("POST", "/api/v1/admin/test-model-capabilities"),
+    ("POST", "/api/v1/auth/validate-key"),
+    ("POST", "/api/v1/compliance/doc_x/stream"),
     ("GET", "/api/v1/info"),
 ]
 
@@ -80,6 +83,38 @@ async def test_capability_probe_rejects_caller_supplied_endpoints(stack):
     assert ok.status_code == 200
     body = ok.json()
     assert body["model"] == "mock-judge" and body["context_length"] == 32768 and body["destination"] == "scripted.local"
+
+
+@pytest.mark.asyncio
+async def test_validate_key_endpoint_probes_once_and_caches(stack):
+    """D28: POST /api/v1/auth/validate-key live-probes the key; 401 on garbage, 200 + cached on valid."""
+    app = stack.app(ScriptedLLM())
+    async with _client(app) as client:
+        bad = await client.post("/api/v1/auth/validate-key", headers={"X-OpenRouter-Key": "sk-or-v1-garbage"})
+        assert bad.status_code == 401
+        missing = await client.post("/api/v1/auth/validate-key")
+        assert missing.status_code == 401
+        ok = await client.post("/api/v1/auth/validate-key", headers={"X-OpenRouter-Key": VALID_KEY})
+        assert ok.status_code == 200
+        body = ok.json()
+        assert body["valid"] is True and body["mode"] == "byok"
+        profile = app.dependency_overrides[deps.get_inference_profile]()
+        assert profile.key_cache.is_fresh(VALID_KEY)  # remembered: later asks skip the probe
+
+
+def test_validated_key_cache_process_lifetime_and_cap():
+    from app.services.inference import ValidatedKeyCache
+
+    cache = ValidatedKeyCache(ttl_seconds=0, max_entries=2)  # D28: 0 = valid for the process lifetime
+    cache.remember("k1")
+    assert cache.is_fresh("k1") and not cache.is_fresh("k2")
+    cache.remember("k2")
+    cache.remember("k3")  # FIFO-evicts k1
+    assert not cache.is_fresh("k1") and cache.is_fresh("k2") and cache.is_fresh("k3")
+
+    expiring = ValidatedKeyCache(ttl_seconds=60, max_entries=10)
+    expiring.remember("a")
+    assert expiring.is_fresh("a")
 
 
 def test_startup_refuses_public_bind_without_master_key():

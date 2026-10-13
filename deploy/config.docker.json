@@ -83,7 +83,8 @@
   "compliance": {
     "max_requirements": 40,
     "evidence_top_k": 3,
-    "evidence_candidates": 50
+    "evidence_candidates": 50,
+    "max_concurrent_assessments": 4
   },
   "timeouts": {
     "openrouter_seconds": 60.0,
@@ -97,7 +98,8 @@
     "ollama_base_url": "http://127.0.0.1:11434",
     "ollama_writer_model": "qwen2.5:3b",
     "ollama_judge_model": "phi3:latest",
-    "byok_validation_ttl_seconds": 300
+    "byok_validation_ttl_seconds": 0,
+    "byok_validated_keys_max": 1024
   },
   "logging": {
     "log_full_prompts": false

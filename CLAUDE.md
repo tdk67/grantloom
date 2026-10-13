@@ -40,7 +40,7 @@ No linter or type checker is configured. Don't run or wait on local Ollama model
 The code follows a hexagonal layout: `api -> services -> ports <- adapters`. `app/api/deps.py` is the composition root, with lazy singletons built from Settings and `reset_dependencies()` to clear them.
 
 **Provider selection:** `app/services/inference.py` decides which provider serves requests, based only on `llm.private_mode`:
-- `false`: OpenRouter. The `X-OpenRouter-Key` header is mandatory and is probed live; results are cached by SHA-256 digest only.
+- `false`: OpenRouter. The `X-OpenRouter-Key` header is mandatory. The key is validated **once** — when the UI saves it (`POST /api/v1/auth/validate-key`) or on first use — and the digest is then remembered for the process lifetime (`llm.byok_validation_ttl_seconds: 0`; FIFO-capped by `llm.byok_validated_keys_max`). Revoked keys still fail immediately because every real provider call maps upstream 401/402 to RFC 7807 errors.
 - `true`: local Ollama. No key is accepted or forwarded.
 
 A server-side key never changes the provider. `InferenceProfile.egress()` feeds the SSE `egress` event and `GET /api/v1/info`.
@@ -68,6 +68,8 @@ Up to `max_rewrite_attempts` rewrites follow, each starting with a `rewrite` eve
 - `IngestionScanner` counts *chunks*, not regex matches. Tainted chunks are marked `metadata.tainted` and dropped at G3. A document is quarantined when tainted chunks exceed `taint_threshold_chunks`.
 - Deletion is a `deleting` outbox job (a saga), and `DELETE` returns 202. The PDF extractor strips running headers and footers, and retrieval suppresses near-duplicate chunks.
 - The Chroma collection stores the embedder fingerprint and refuses to mix embedding spaces.
+
+**Compliance:** `ComplianceService` extracts the solicitation's own requirement sentences, retrieves lab evidence from the other active documents, and classifies each via the decision backend. Assessments run with bounded concurrency (`compliance.max_concurrent_assessments`); `POST /api/v1/compliance/{id}/stream` emits `start` → `progress` (per requirement) → `done` so the UI shows a real progress bar. Records persist in extraction order (`REQ-01..n`) even though progress events arrive in completion order.
 
 **Access:** every `/api/v1` router carries `Depends(verify_master_api_key)`. Without `MASTER_API_KEY`, only loopback clients are served — unless `server.public_byok: true` (D27, used by the Docker deploy): remote clients are served without a server key, but every LLM call still requires the caller's live-probed `X-OpenRouter-Key`. Startup (`app/services/startup_checks.py`) refuses a non-loopback host when no key is set and `public_byok` is off, and refuses `public_byok` combined with `private_mode` (free local inference must never be public). Rate limits use slowapi; endpoints need a `request: Request` parameter. The VPS nginx adds TLS, SSE unbuffered proxying, per-IP `limit_req`, and blocks public `/metrics`.
 

@@ -21,6 +21,7 @@ from app.api.ask import router as ask_router
 from app.api.compliance import router as compliance_router
 from app.api.deps import get_graph_store, get_ingest_worker, get_registry, get_vector_store
 from app.api.documents import router as documents_router
+from app.api.auth import router as auth_router
 from app.api.examples import router as examples_router
 from app.api.info import router as info_router
 from app.core.config import Settings, get_settings
@@ -98,6 +99,7 @@ def create_app() -> FastAPI:
     app.include_router(ask_router)
     app.include_router(compliance_router)
     app.include_router(examples_router)
+    app.include_router(auth_router)
     app.include_router(admin_router)
     app.include_router(info_router)
 

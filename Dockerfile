@@ -29,7 +29,7 @@ COPY app ./app
 COPY alembic ./alembic
 COPY alembic.ini ./
 COPY templates ./templates
-COPY config/config.json ./config/config.json
+COPY config ./config
 
 # Persistent state (SQLite, Chroma, Kùzu, uploads) lives in the /app/data volume
 RUN mkdir -p /app/data && chown -R grantloom:grantloom /app /app/data

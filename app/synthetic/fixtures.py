@@ -72,34 +72,34 @@ def get_planted_facts() -> List[PlantedFact]:
         PlantedFact(
             fact_id="FACT_008_TRAVEL_TOTAL",
             question="What is the total travel budget requested in the lab budget spreadsheet?",
-            expected_answer="The total travel budget is exactly $12,450.",
+            expected_answer="The total travel budget is exactly $18,150 (Travel sheet subtotal, matching Summary_Budget row B).",
             document_name="Lab_Budget_2025_Sample.xlsx",
-            location_hint="Sheet 'Travel', Cell H5",
+            location_hint="Sheet 'Travel', Cell H7 (Travel Subtotal)",
             expected_sheet="Travel",
-            expected_cell="H5",
-            keywords=["travel", "$12,450", "total"],
-            numeric_value=12450.0,
+            expected_cell="H7",
+            keywords=["travel", "$18,150", "total"],
+            numeric_value=18150.0,
         ),
         PlantedFact(
             fact_id="FACT_009_EQUIPMENT_TOTAL",
             question="What is the total equipment cost requested in the lab budget spreadsheet?",
-            expected_answer="The total equipment cost is $68,000 across three line items.",
+            expected_answer="The total equipment cost is $151,000 across five line items.",
             document_name="Lab_Budget_2025_Sample.xlsx",
-            location_hint="Sheet 'Equipment', Cell E5",
+            location_hint="Sheet 'Equipment', Cell E7 (Equipment Subtotal)",
             expected_sheet="Equipment",
-            expected_cell="E5",
-            keywords=["equipment", "$68,000", "total"],
-            numeric_value=68000.0,
+            expected_cell="E7",
+            keywords=["equipment", "$151,000", "total"],
+            numeric_value=151000.0,
         ),
         PlantedFact(
             fact_id="FACT_010_EQUIPMENT_APPROVAL_REQUIRED",
             question="Does any individual equipment item in the lab budget spreadsheet exceed the $50,000 approval threshold?",
-            expected_answer="No single equipment item exceeds $50,000 (the highest is the Bi-Directional DC Power Supply at $32,000). Therefore, no individual pre-approval is required under the threshold rule.",
+            expected_answer="Yes — the Solar Simulator Spectrometer at $55,000 exceeds the $50,000 threshold and requires Contracting Officer prior approval with three vendor price quotations (documented in the Facilities Capability Statement, procurement folder PROC-2024-11).",
             document_name="Lab_Budget_2025_Sample.xlsx",
-            location_hint="Sheet 'Equipment', Rows 2-4",
+            location_hint="Sheet 'Equipment', Rows 2-6",
             expected_sheet="Equipment",
-            keywords=["exceed", "threshold", "$50,000", "No", "$32,000"],
-            numeric_value=0.0,
+            keywords=["exceed", "threshold", "$50,000", "Yes", "$55,000", "Spectrometer"],
+            numeric_value=55000.0,
         ),
     ]
 
@@ -443,7 +443,7 @@ def build_lab_budget_specs() -> List[SheetSpec]:
         )
     )
 
-    # Sheet 2: Travel (Planted Fact 8: Total = $12,450)
+    # Sheet 2: Travel (Planted Fact 8: Total = $18,150 = 3850+4600+4000+4200+1500)
     travel_headers = [
         "Trip Destination & Event",
         "Purpose",
@@ -474,7 +474,7 @@ def build_lab_budget_specs() -> List[SheetSpec]:
         )
     )
 
-    # Sheet 3: Equipment (Planted Fact 9: Total = $68,000; Fact 10: None > $50k)
+    # Sheet 3: Equipment (Planted Fact 9: Total = $151,000; Fact 10: Spectrometer $55k > $50k threshold)
     equip_headers = [
         "Item Description",
         "Manufacturer / Model",
@@ -490,7 +490,7 @@ def build_lab_budget_specs() -> List[SheetSpec]:
         ["Solar Simulator Spectrometer", "Sciencetech Class AAA", 1, 55000, "=C5*D5", "Yes ($55,000)"],
         ["IV Characterization Station", "Keithley 2400 SourceMeter", 1, 28000, "=C6*D6", "No ($28,000)"],
     ]
-    equip_total = ["Equipment Subtotal", "", "=SUM(C2:C6)", "", "=SUM(E2:E6)", "All items < $50,000"]
+    equip_total = ["Equipment Subtotal", "", "=SUM(C2:C6)", "", "=SUM(E2:E6)", "Spectrometer ($55,000) >= $50k: CO prior approval + 3 quotes on file"]
     equip_formats = {4: "$#,##0", 5: "$#,##0"}
     sheets.append(
         SheetSpec(
@@ -506,9 +506,9 @@ def build_lab_budget_specs() -> List[SheetSpec]:
     # Sheet 4: Summary Budget & Indirect Costs
     summary_headers = ["Budget Category", "Direct Cost", "MTDC Excluded", "Base for F&A", "Notes / Justification"]
     summary_rows = [
-        ["A. Personnel (Salaries & Fringe)", 158190, 0, 158190, "From Personnel Sheet (4 key staff)"],
-        ["B. Travel (Domestic Conferences & Sites)", 12450, 0, 12450, "From Travel Sheet (DOE Review + IEEE PES)"],
-        ["C. Equipment (Capital items > $5k)", 68000, 68000, 0, "Excluded from MTDC under 2 CFR 200"],
+        ["A. Personnel (Salaries & Fringe)", 258990, 0, 258990, "From Personnel Sheet (6 staff lines, salaries + fringe)"],
+        ["B. Travel (Domestic Conferences & Sites)", 18150, 0, 18150, "From Travel Sheet (5 domestic trips, Fly America compliant)"],
+        ["C. Equipment (Capital items > $5k)", 151000, 151000, 0, "Excluded from MTDC under 2 CFR 200"],
         ["D. Supplies & Testing Consumables", 16500, 0, 16500, "Cables, sensors, load resistors"],
         ["E. Total Direct Costs (A+B+C+D)", "=SUM(B2:B5)", "=SUM(C2:C5)", "=SUM(D2:D5)", "Sum of all direct categories"],
         ["F. Modified Total Direct Cost (MTDC)", "=D6", 0, "=D6", "Allowable F&A base"],
@@ -595,4 +595,197 @@ def build_compliance_matrix_spec() -> SheetSpec:
         headers=headers,
         rows=rows,
         note="Audit Matrix: DE-FOA-0003291 Solicitation Requirements vs CHIL Proposal",
+    )
+
+
+def build_cost_share_letter_spec() -> DocumentDefinition:
+    """Binding non-federal cost-share commitment letter (evidence for the 20% match requirement).
+
+    All figures mirror the Past Proposal and Compliance Checklist facts: federal award $1,250,000,
+    non-federal share $312,500 = 20.0% of the $1,562,500 total project cost (2 CFR 200.306).
+    """
+    sections: List[SectionContent] = []
+
+    sections.append(
+        SectionContent(
+            title="Maryland Clean Energy Center — Letter of Commitment",
+            level=1,
+            paragraphs=[
+                "Maryland Clean Energy Center (MCEC), 1212 Cathedral Street, Baltimore, MD 21201",
+                "Date of Issue: April 8, 2025",
+                "To: Dr. Elena Vance, Principal Investigator, Community Health Innovation Lab (CHIL)",
+                "Re: Irrevocable Non-Federal Cost Share Commitment for the DOE Solar Energy Technologies "
+                "Office application under Funding Opportunity Announcement DE-FOA-0003291, and continuation "
+                "of the Urban Microgrid Solar Storage Integration project (Federal Award DE-EE0009871).",
+            ],
+            callout_box=(
+                "This letter constitutes a binding commitment of non-federal funds. MCEC certifies that the "
+                "committed cost share complies with 2 CFR 200.306 and will be verifiable in the Center's "
+                "audited financial records."
+            ),
+            page_break_after=True,
+        )
+    )
+
+    sections.append(
+        SectionContent(
+            title="Committed Amount and Composition",
+            level=1,
+            paragraphs=[
+                "The Maryland Clean Energy Center hereby commits a total non-federal cost share of $312,500 "
+                "for the period of performance of the enclosed proposal. This commitment equals exactly 20.0% "
+                "of the total project cost of $1,562,500 and satisfies the mandatory minimum non-federal share "
+                "required by Section IV.C of DE-FOA-0003291.",
+                "The commitment is composed of $200,000 in direct cash contributions, disbursed quarterly "
+                "against approved invoices, and $112,500 in verifiable in-kind contributions: 450 hours of "
+                "MCEC grid-engineering staff time valued at $67,500, and scheduled access to the Center's "
+                "100 kW regenerative grid emulator facility valued at $45,000.",
+            ],
+            bullet_points=[
+                "Total committed non-federal cost share: $312,500 (20.0% of $1,562,500 total project cost)",
+                "Cash component: $200,000, disbursed quarterly against approved invoices",
+                "In-kind component: $112,500 (engineering staff time $67,500; grid emulator facility time $45,000)",
+                "Third-party verification: annual CPA attestation letter provided to the Contracting Officer",
+                "No portion of the committed share is counted toward any other federal award",
+            ],
+        )
+    )
+
+    sections.append(
+        SectionContent(
+            title="Authorization",
+            level=1,
+            paragraphs=[
+                "The Board of Directors of the Maryland Clean Energy Center authorized this commitment at its "
+                "regular meeting of March 27, 2025 (Board Resolution 2025-11). This commitment remains in force "
+                "for the full period of performance of any resulting award.",
+                "Sincerely,",
+                "Dr. Marcus Chen, Executive Director, Maryland Clean Energy Center (MCEC)",
+                "Countersigned: Jordan Ellis, Facility Manager, Grid Edge Testing Laboratory (in-kind scheduling)",
+            ],
+        )
+    )
+
+    return DocumentDefinition(
+        doc_id="synthetic_cost_share_letter",
+        filename="Cost_Share_Commitment_Letter_2025.pdf",
+        title="Non-Federal Cost Share Commitment Letter",
+        subtitle="Maryland Clean Energy Center — $312,500 (20.0%) Binding Commitment",
+        author_or_agency="Maryland Clean Energy Center (MCEC)",
+        date_str="April 8, 2025",
+        doc_type="support_pdf",
+        sections=sections,
+        metadata={"related_award": "DE-EE0009871", "related_foa": "DE-FOA-0003291"},
+    )
+
+
+def build_facilities_capability_spec() -> DocumentDefinition:
+    """Facility & equipment capability statement for the Grid Edge Testing Laboratory.
+
+    Equipment inventory and personnel mirror Lab_Budget_2025_Sample.xlsx exactly, giving the
+    compliance assessor real lab-side evidence for equipment, personnel and prior-performance
+    requirements. No NSF/NIH content (golden Q44/Q45 must remain unanswerable).
+    """
+    sections: List[SectionContent] = []
+
+    sections.append(
+        SectionContent(
+            title="1. Facility Overview",
+            level=1,
+            paragraphs=[
+                "Facility Name: Grid Edge Testing Laboratory, operated by Community Health Innovation Lab (CHIL).",
+                "Location: Baltimore Innovation Center, 450 E 29th Street, Baltimore, MD 21218.",
+                "The laboratory provides 4,500 square feet of dedicated grid-edge testing space, including a "
+                "100 kW regenerative AC grid emulator, a real-time digital simulator (RTDS), a high-voltage DC "
+                "test bench, and a programmable three-phase source for hardware-in-the-loop (HIL) validation of "
+                "microgrid islanding and black-start procedures.",
+                "The facility is open to award personnel 24/7 with badge access, and it maintains a calibrated "
+                "instrumentation program traceable to NIST standards with annual recertification.",
+            ],
+            page_break_after=True,
+        )
+    )
+
+    sections.append(
+        SectionContent(
+            title="2. Capital Equipment Inventory (Owned and Operational)",
+            level=1,
+            paragraphs=[
+                "The following capital equipment is owned outright by CHIL, is operational, and requires no new "
+                "procurement under the proposed award. Acquisition values match the Equipment sheet of "
+                "Lab_Budget_2025_Sample.xlsx.",
+            ],
+            table_data=[
+                ["Item", "Manufacturer / Model", "Acquisition Value", "Status"],
+                ["High-Precision Power Quality Analyzer", "Chroma 66205", "$18,000", "Owned - Operational"],
+                ["Bi-Directional DC Power Supply (15kW)", "Magna-Power XR Series", "$32,000", "Owned - Operational"],
+                ["High-Voltage Isolation Test Enclosure", "Custom Faraday RF-Shield", "$18,000", "Owned - Operational"],
+                ["Solar Simulator Spectrometer", "Sciencetech Class AAA", "$55,000", "Owned - Operational"],
+                ["IV Characterization Station", "Keithley 2400 SourceMeter", "$28,000", "Owned - Operational"],
+            ],
+            bullet_points=[
+                "The Solar Simulator Spectrometer ($55,000) exceeded the $50,000 capital threshold at purchase; "
+                "Contracting Officer prior approval and three vendor price quotations are on file (procurement "
+                "folder PROC-2024-11).",
+                "Total owned equipment value available to the award: $151,000.",
+            ],
+            page_break_after=True,
+        )
+    )
+
+    sections.append(
+        SectionContent(
+            title="3. Key Personnel Assigned to the Facility",
+            level=1,
+            table_data=[
+                ["Name", "Role", "Qualification Summary"],
+                ["Dr. Elena Vance", "Principal Investigator", "Ph.D. 2014, Johns Hopkins University; 12 years grid engineering leadership"],
+                ["Marcus Holloway", "Senior Firmware Engineer", "Lead firmware engineer, CHIL microgrid controls (2019-present)"],
+                ["Dr. Aisha Patel", "Community Equity Lead", "Energy justice program design; monthly East Baltimore workshops"],
+                ["Alex Mercer", "Postdoctoral Scholar", "Inverter control and islanding detection research"],
+                ["Samira Khan", "Graduate Student Researcher", "Battery state estimation; 0.5 FTE academic year"],
+            ],
+            paragraphs=[
+                "All listed personnel are current CHIL employees or appointees in good standing, and their "
+                "committed effort for the budget period is documented in the Personnel sheet of "
+                "Lab_Budget_2025_Sample.xlsx.",
+            ],
+        )
+    )
+
+    sections.append(
+        SectionContent(
+            title="4. Prior Performance and Compliance Record",
+            level=1,
+            paragraphs=[
+                "Between 2022 and 2025 the laboratory supported four pilot microgrid deployments in East "
+                "Baltimore, achieving 99.4% aggregate uptime across all pilot sites, as documented in the "
+                "CHIL past-performance proposal (award DE-EE0009871).",
+            ],
+            bullet_points=[
+                "All award-related domestic air travel complies with the Fly America Act (49 U.S.C. 40118); "
+                "carrier certifications are retained with each travel voucher.",
+                "The facility maintains an export-control compliance plan and NEPA categorical-exclusion "
+                "documentation for all grid-interconnection experiments.",
+                "Annual safety training completion is 100% for all badge holders; last audit March 2025.",
+                "Data management: all datasets produced in the facility are deposited in the CHIL public-access "
+                "repository within 90 days of collection.",
+            ],
+            callout_box=(
+                "Certified by: Jordan Ellis, Facility Manager, Grid Edge Testing Laboratory. "
+                "Date: April 10, 2025."
+            ),
+        )
+    )
+
+    return DocumentDefinition(
+        doc_id="synthetic_facilities_capability",
+        filename="Facilities_Capability_Statement_2025.pdf",
+        title="Facilities & Capability Statement",
+        subtitle="Grid Edge Testing Laboratory — Baltimore Innovation Center",
+        author_or_agency="Community Health Innovation Lab (CHIL)",
+        date_str="April 10, 2025",
+        doc_type="facility_pdf",
+        sections=sections,
+        metadata={"facility": "Grid Edge Testing Laboratory"},
     )

@@ -167,7 +167,7 @@ async def test_byok_validation_is_cached_by_digest_only():
             CountingLLM.probes += 1
             return await super().validate_api_key(api_key)
 
-    cache = ValidatedKeyCache(ttl_seconds=300)
+    cache = ValidatedKeyCache(ttl_seconds=300, max_entries=16)
     profile = InferenceProfile("byok", CountingLLM(), "w", "j", "deterministic", key_cache=cache)
     for _ in range(3):
         assert await profile.authorize(VALID_KEY) == VALID_KEY

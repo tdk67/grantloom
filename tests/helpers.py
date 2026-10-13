@@ -29,7 +29,7 @@ from app.services.chunker import DocumentChunker
 from app.services.compliance_service import ComplianceService
 from app.services.extractor import DocumentExtractor
 from app.services.guardrails import IngestionScanner
-from app.services.inference import InferenceProfile
+from app.services.inference import InferenceProfile, ValidatedKeyCache
 from app.services.ingest_service import IngestionService
 from app.services.key_vault import EphemeralKeyVault
 from app.services.retrieval_service import HybridRetrievalService, corpus_overlap
@@ -142,8 +142,20 @@ class Stack:
         return ComplianceService(self.registry, self.vector_store, self.embedder, decision or self.decision, self.settings)
 
     def profile(self, llm: LLMClientPort, mode: str = "byok") -> InferenceProfile:
-        return InferenceProfile(mode=mode, client=llm, writer_model="mock-writer", judge_model="mock-judge",
-                                embedding_description="deterministic")
+        # Memoized like the production singleton so the validated-key cache survives across requests
+        cache_key = (id(llm), mode)
+        if not hasattr(self, "_profile_memo"):
+            self._profile_memo = {}
+        if cache_key not in self._profile_memo:
+            key_cache = (
+                ValidatedKeyCache(self.settings.llm.byok_validation_ttl_seconds, self.settings.llm.byok_validated_keys_max)
+                if mode == "byok" else None
+            )
+            self._profile_memo[cache_key] = InferenceProfile(
+                mode=mode, client=llm, writer_model="mock-writer", judge_model="mock-judge",
+                embedding_description="deterministic", key_cache=key_cache,
+            )
+        return self._profile_memo[cache_key]
 
     def app(self, llm: Optional[LLMClientPort] = None, mode: str = "byok") -> FastAPI:
         llm = llm or ScriptedLLM()

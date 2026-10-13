@@ -9,17 +9,18 @@ The readiness score is an estimate, never a funding guarantee (FR-C3).
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import re
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Optional
 
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from app.core.config import Settings
-from app.core.errors import NotFoundError, ValidationError
+from app.core.errors import GrantLoomError, NotFoundError, ValidationError
 from app.core.templates import load_json_template
 from app.core.text import lexicon_hits, split_sentences
 from app.ports.decision_backend import DecisionBackendPort
@@ -55,6 +56,7 @@ class ComplianceService:
         self.max_requirements = settings.compliance.max_requirements
         self.evidence_top_k = settings.compliance.evidence_top_k
         self.evidence_candidates = settings.compliance.evidence_candidates
+        self.max_concurrent_assessments = settings.compliance.max_concurrent_assessments
         self.rrf_k = settings.retrieval.rrf_k
         lexicon = load_json_template("decision/heuristic_lexicon.json")
         self.markers: list[str] = lexicon["requirement_markers"]
@@ -100,8 +102,15 @@ class ComplianceService:
         chunks = [self.registry.get_chunk(cid) for cid in best]
         return [c for c in chunks if c is not None and not c.metadata.get("tainted")]
 
-    async def evaluate_solicitation(self, solicitation_id: str, api_key: Optional[str] = None) -> dict[str, Any]:
-        """Extract requirements, assess lab evidence, persist the records, and return the matrix."""
+    async def _evaluate_stream(
+        self, solicitation_id: str, api_key: Optional[str]
+    ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+        """Raw evaluation stream (raises on error): start -> progress* -> done.
+
+        Requirements are assessed with bounded concurrency (config
+        `compliance.max_concurrent_assessments`); `progress` events arrive in completion order,
+        while records are persisted in extraction order (REQ-01..n).
+        """
         solicitation = self.registry.get_document(solicitation_id)
         if not solicitation:
             raise NotFoundError(f"Solicitation document '{solicitation_id}' not found.")
@@ -110,13 +119,30 @@ class ComplianceService:
 
         lab_doc_ids = {d.doc_id for d in self.registry.list_documents(state="active") if d.doc_id != solicitation_id}
         extracted = self.extract_requirements(self.registry.get_chunks_for_document(solicitation_id))
+        yield ("start", {
+            "solicitation_id": solicitation_id,
+            "filename": solicitation.filename,
+            "total_requirements": len(extracted),
+            "lab_documents": len(lab_doc_ids),
+        })
+        if not extracted:
+            self.registry.replace_requirements(solicitation_id, [])
+            yield ("done", self.build_report(solicitation_id) if False else {
+                "solicitation_id": solicitation_id, "solicitation_filename": solicitation.filename,
+                "total_requirements": 0, "satisfied_count": 0, "partial_count": 0, "gap_count": 0,
+                "readiness_score_pct": 0.0, "disclaimer": MANDATORY_DISCLAIMER, "requirements": [],
+            })
+            return
 
-        records: list[dict[str, Any]] = []
-        for idx, req in enumerate(extracted, start=1):
-            evidence = await self._evidence(req["text"], lab_doc_ids) if lab_doc_ids else []
-            assessment = await self.decision_backend.assess_requirement(req["text"], evidence, api_key)
-            records.append({
-                "req_id": f"{solicitation_id}:REQ-{idx:02d}",
+        results: list[Optional[dict[str, Any]]] = [None] * len(extracted)
+        semaphore = asyncio.Semaphore(self.max_concurrent_assessments)
+
+        async def assess(idx: int, req: dict[str, Any]) -> dict[str, Any]:
+            async with semaphore:
+                evidence = await self._evidence(req["text"], lab_doc_ids) if lab_doc_ids else []
+                assessment = await self.decision_backend.assess_requirement(req["text"], evidence, api_key)
+            record = {
+                "req_id": f"{solicitation_id}:REQ-{idx + 1:02d}",
                 "solicitation_id": solicitation_id,
                 "source_chunk_id": req["chunk"].chunk_id,
                 "category": req["category"],
@@ -125,10 +151,54 @@ class ComplianceService:
                 "evidence_chunk_id": assessment.evidence_chunk_id,
                 "rationale": assessment.rationale,
                 "decision_backend": assessment.backend,
-            })
+            }
+            results[idx] = record
+            return record
+
+        tasks = [asyncio.create_task(assess(idx, req)) for idx, req in enumerate(extracted)]
+        evaluated = 0
+        try:
+            for finished in asyncio.as_completed(tasks):
+                record = await finished
+                evaluated += 1
+                yield ("progress", {
+                    "evaluated": evaluated,
+                    "total": len(extracted),
+                    "req_id": record["req_id"].rsplit(":", 1)[-1],
+                    "category": record["category"],
+                    "requirement_text": record["requirement_text"][:140],
+                    "status": record["status"],
+                    "decision_backend": record["decision_backend"],
+                })
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            raise
+
+        records = [r for r in results if r is not None]
         self.registry.replace_requirements(solicitation_id, records)
         logger.info("Evaluated %d requirements for solicitation '%s'.", len(records), solicitation_id)
-        return self.build_report(solicitation_id)
+        yield ("done", self.build_report(solicitation_id))
+
+    async def evaluate_solicitation_stream(
+        self, solicitation_id: str, api_key: Optional[str] = None
+    ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+        """Public SSE stream: start/progress/done; GrantLoomError becomes an `error` event."""
+        try:
+            async for event in self._evaluate_stream(solicitation_id, api_key):
+                yield event
+        except GrantLoomError as exc:
+            logger.error("Compliance evaluation failed: %s", exc.detail)
+            yield ("error", exc.to_problem_details())
+
+    async def evaluate_solicitation(self, solicitation_id: str, api_key: Optional[str] = None) -> dict[str, Any]:
+        """Extract requirements, assess lab evidence, persist the records, and return the matrix."""
+        report: Optional[dict[str, Any]] = None
+        async for event_type, data in self._evaluate_stream(solicitation_id, api_key):
+            if event_type == "done":
+                report = data
+        assert report is not None  # _evaluate_stream always ends with done or raises
+        return report
 
     def build_report(self, solicitation_id: str) -> dict[str, Any]:
         """Matrix view over the persisted requirement records."""

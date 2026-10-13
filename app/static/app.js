@@ -126,6 +126,10 @@ const elements = {
 
   selectSolicitation: document.getElementById("select-solicitation"),
   btnRunCompliance: document.getElementById("btn-run-compliance"),
+  complianceProgressContainer: document.getElementById("compliance-progress-container"),
+  complianceProgressBar: document.getElementById("compliance-progress-bar"),
+  complianceProgressText: document.getElementById("compliance-progress-text"),
+  complianceProgressPct: document.getElementById("compliance-progress-pct"),
   btnExportExcel: document.getElementById("btn-export-excel"),
   readinessCard: document.getElementById("readiness-card"),
   readinessScore: document.getElementById("readiness-score"),
@@ -581,22 +585,73 @@ function highlightKeywords(text) {
 // 8. Compliance Matrix & Excel Export
 // ==============================================================================
 
+async function* sseEvents(res) {
+  // Shared fetch-based SSE reader (EventSource cannot send POST bodies/headers)
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const blocks = buffer.split("\n\n");
+    buffer = blocks.pop() || "";
+    for (const block of blocks) {
+      const eventMatch = block.match(/^event:\s*(.+)$/m);
+      const dataMatch = block.match(/^data:\s*(.+)$/m);
+      if (!eventMatch || !dataMatch) continue;
+      let data = {};
+      try {
+        data = JSON.parse(dataMatch[1].trim());
+      } catch (e) {}
+      yield [eventMatch[1].trim(), data];
+    }
+  }
+}
+
 async function runComplianceAudit() {
   const solicitationId = elements.selectSolicitation.value;
   if (!solicitationId) {
     alert("Please select a target solicitation first.");
     return;
   }
-  elements.complianceTableBody.innerHTML = `<tr><td colspan="5" class="empty-state">Extracting requirements and assessing lab evidence...</td></tr>`;
+  elements.btnRunCompliance.disabled = true;
+  elements.complianceProgressContainer.classList.remove("hidden");
+  elements.complianceProgressBar.style.width = "3%";
+  elements.complianceProgressPct.textContent = "...";
+  elements.complianceProgressText.textContent = "Validating key and extracting requirements...";
+  elements.complianceTableBody.innerHTML = `<tr><td colspan="5" class="empty-state">Audit running — progress above.</td></tr>`;
   try {
-    const res = await apiFetch(`/api/v1/compliance/${solicitationId}`, { method: "POST" });
+    const res = await apiFetch(`/api/v1/compliance/${solicitationId}/stream`, { method: "POST" });
     if (!res.ok) {
       alert(`Audit error: ${await problemDetail(res)}`);
       return;
     }
-    renderComplianceMatrix(await res.json());
+    for await (const [event, data] of sseEvents(res)) {
+      if (event === "start") {
+        elements.complianceProgressText.textContent =
+          `Found ${data.total_requirements} requirement(s) in ${data.filename}; assessing against ${data.lab_documents} lab document(s)...`;
+      } else if (event === "progress") {
+        const pct = data.total ? Math.round((data.evaluated / data.total) * 100) : 0;
+        elements.complianceProgressBar.style.width = `${pct}%`;
+        elements.complianceProgressPct.textContent = `${data.evaluated}/${data.total}`;
+        elements.complianceProgressText.textContent = `${data.req_id} · ${data.category}: ${data.requirement_text}`;
+      } else if (event === "done") {
+        renderComplianceMatrix(data);
+        elements.complianceProgressBar.style.width = "100%";
+        elements.complianceProgressPct.textContent = "Done";
+        elements.complianceProgressText.textContent = `Audit complete — ${data.total_requirements} requirement(s), readiness ${data.readiness_score_pct}%.`;
+        setTimeout(() => elements.complianceProgressContainer.classList.add("hidden"), 4000);
+      } else if (event === "error") {
+        alert(`Audit error: ${data.detail || "evaluation failed"}`);
+        elements.complianceProgressText.textContent = "Audit failed — see error.";
+      }
+    }
   } catch (err) {
     console.error("Compliance error:", err);
+    elements.complianceProgressText.textContent = `Connection error: ${err.message}`;
+  } finally {
+    elements.btnRunCompliance.disabled = false;
   }
 }
 
@@ -697,10 +752,35 @@ async function saveSettings() {
   state.masterKey = elements.inputMasterKey.value.trim();
   await setStoredCredential("openrouter_api_key", state.apiKey);
   await setStoredCredential("master_api_key", state.masterKey);
+  // D28: validate the key server-side once, on save (the server then skips per-request probes)
+  if (state.apiKey) {
+    elements.keyProbeResult.textContent = "Validating key with the server...";
+    await validateKeyOnServer();
+  } else {
+    elements.keyProbeResult.textContent = "";
+  }
   closeSettingsModal();
   await loadServerInfo();
   await fetchDocuments();
   await loadStarterPrompts();
+}
+
+async function validateKeyOnServer() {
+  try {
+    const res = await apiFetch("/api/v1/auth/validate-key", { method: "POST" });
+    if (res.ok) {
+      const d = await res.json();
+      elements.keyProbeResult.textContent = d.mode === "private"
+        ? "🟢 Private mode — no key needed (local Ollama)."
+        : `🟢 Key valid — remembered by the server (${d.writer_model} writer, ${d.judge_model} judge).`;
+      return true;
+    }
+    elements.keyProbeResult.textContent = `🔴 ${await problemDetail(res)}`;
+    return false;
+  } catch (err) {
+    elements.keyProbeResult.textContent = "⚠️ Could not reach the server to validate the key.";
+    return false;
+  }
 }
 
 async function testApiKeyProbe() {
@@ -709,13 +789,9 @@ async function testApiKeyProbe() {
     elements.keyProbeResult.textContent = "Please enter a key first.";
     return;
   }
-  elements.keyProbeResult.textContent = "Probing OpenRouter key...";
-  try {
-    const res = await fetch("https://openrouter.ai/api/v1/auth/key", { headers: { Authorization: `Bearer ${key}` } });
-    elements.keyProbeResult.textContent = res.status === 200 ? "🟢 Key valid" : `🔴 Key rejected (HTTP ${res.status})`;
-  } catch (err) {
-    elements.keyProbeResult.textContent = "⚠️ Could not reach OpenRouter from the browser; the server validates the key on each request.";
-  }
+  state.apiKey = key; // apiFetch attaches the X-OpenRouter-Key header from state
+  elements.keyProbeResult.textContent = "Validating key with the server...";
+  await validateKeyOnServer();
 }
 
 async function checkConfiguredModels() {

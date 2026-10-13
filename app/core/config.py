@@ -148,6 +148,7 @@ class ComplianceConfig(_Strict):
     max_requirements: int
     evidence_top_k: int
     evidence_candidates: int
+    max_concurrent_assessments: int
 
 
 class TimeoutsConfig(_Strict):
@@ -163,7 +164,8 @@ class LLMConfig(_Strict):
     ollama_base_url: str
     ollama_writer_model: str
     ollama_judge_model: str
-    byok_validation_ttl_seconds: int
+    byok_validation_ttl_seconds: int  # 0 = validate once per process lifetime (D28)
+    byok_validated_keys_max: int
 
 
 class LoggingConfig(_Strict):

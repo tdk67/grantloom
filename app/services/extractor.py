@@ -17,10 +17,97 @@ from typing import Any, Optional
 import openpyxl
 import pdfplumber
 import pypdf
+from openpyxl.utils import column_index_from_string
 
 from app.core.errors import ExtractionError
 
 logger = logging.getLogger("grantloom.services.extractor")
+
+# --- Safe evaluation of spreadsheet formulas without cached values -------------------------
+# Files written by generators (or edited by tools that do not compute results) store formulas
+# with no cached value; data_only readers then see None and whole total columns vanish from
+# retrieval. We re-evaluate the two most common, side-effect-free shapes — SUM(range) and
+# plain arithmetic over cell references — and leave everything else (IF/VLOOKUP/cross-sheet)
+# as None. This is a conservative recovery, never a guess: unsupported grammar yields None.
+
+_SUM_RANGE_RE = re.compile(r"SUM\(\s*\$?([A-Z]{1,3})\$?(\d{1,6})\s*:\s*\$?([A-Z]{1,3})\$?(\d{1,6})\s*\)", re.IGNORECASE)
+_CELL_REF_RE = re.compile(r"(?<![A-Za-z0-9_])\$?([A-Z]{1,3})\$?(\d{1,6})(?![A-Za-z0-9_(])")
+_SAFE_ARITH_RE = re.compile(r"^[0-9eE+\-*/().\s]+$")
+
+
+def _is_number(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _eval_formula(formula: str, get: Any) -> Optional[float]:
+    """Evaluate '=SUM(A1:A5)' / '=B2*C2' / '=B6+B8'-style formulas. get(row, col) -> value."""
+    expr = formula.lstrip("=").strip()
+
+    def sum_repl(m: re.Match) -> str:
+        c1, r1 = column_index_from_string(m.group(1)), int(m.group(2))
+        c2, r2 = column_index_from_string(m.group(3)), int(m.group(4))
+        total = 0.0
+        for rr in range(min(r1, r2), max(r1, r2) + 1):
+            for cc in range(min(c1, c2), max(c1, c2) + 1):
+                v = get(rr, cc)
+                if _is_number(v):
+                    total += v
+        return repr(total)
+
+    def ref_repl(m: re.Match) -> str:
+        v = get(int(m.group(2)), column_index_from_string(m.group(1)))
+        return repr(v) if _is_number(v) else "0"
+
+    expr = _SUM_RANGE_RE.sub(sum_repl, expr)
+    expr = _CELL_REF_RE.sub(ref_repl, expr)
+    if not _SAFE_ARITH_RE.match(expr):
+        return None  # functions we do not model (IF, VLOOKUP, cross-sheet refs, ...)
+    try:
+        result = eval(expr, {"__builtins__": {}})  # noqa: S307 — charset-validated arithmetic only
+    except Exception:
+        return None
+    if not _is_number(result):
+        return None
+    return int(result) if float(result) == int(result) else round(float(result), 2)
+
+
+def _fill_formula_values(rows: list[tuple], formula_ws: Any) -> list[tuple]:
+    """Replace None cells that hold a supported formula with their computed value."""
+    values: dict[tuple[int, int], Any] = {}
+    formulas: dict[tuple[int, int], str] = {}
+    for r_idx, row in enumerate(rows, start=1):
+        for c_idx, val in enumerate(row, start=1):
+            if val is not None:
+                values[(r_idx, c_idx)] = val
+    for f_row in formula_ws.iter_rows():
+        for cell in f_row:
+            if isinstance(cell.value, str) and cell.value.startswith("="):
+                formulas[(cell.row, cell.column)] = cell.value
+    if not formulas:
+        return rows
+
+    memo: dict[tuple[int, int], Any] = {}
+
+    def resolve(r: int, c: int, stack: frozenset) -> Any:
+        if (r, c) in memo:
+            return memo[(r, c)]
+        if (r, c) in values:
+            return values[(r, c)]
+        formula = formulas.get((r, c))
+        if formula is None or (r, c) in stack:
+            return None  # missing reference or cycle
+        result = _eval_formula(formula, lambda rr, cc: resolve(rr, cc, stack | {(r, c)}))
+        memo[(r, c)] = result
+        return result
+
+    filled: list[tuple] = []
+    for r_idx, row in enumerate(rows, start=1):
+        new_row = list(row)
+        for c_idx, val in enumerate(row, start=1):
+            if val is None and (r_idx, c_idx) in formulas:
+                new_row[c_idx - 1] = resolve(r_idx, c_idx, frozenset())
+        filled.append(tuple(new_row))
+    return filled
 
 
 @dataclass
@@ -238,6 +325,7 @@ class DocumentExtractor:
         """Extract Excel sheets preserving sheet names and row coordinates."""
         try:
             wb = openpyxl.load_workbook(str(path), data_only=True)
+            wb_formulas = openpyxl.load_workbook(str(path), data_only=False)
             sections: list[ExtractedSection] = []
 
             structured_sheets: dict[str, dict[str, Any]] = {}
@@ -246,6 +334,7 @@ class DocumentExtractor:
                 rows = list(ws.iter_rows(values_only=True))
                 if not rows:
                     continue
+                rows = _fill_formula_values(rows, wb_formulas[sheet_name])
 
                 # First non-empty row as header
                 headers: list[str] = []

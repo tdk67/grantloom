@@ -78,7 +78,11 @@ python -m app                             # serves on server.host:server.port fr
 ```
 
 Open <http://localhost:8000/>, open **Settings** and enter your OpenRouter key (BYOK mode) and, if the
-server sets `MASTER_API_KEY`, the server access key. Click **Generate Demo Data** to index the synthetic corpus.
+server sets `MASTER_API_KEY`, the server access key — on the public demo instance no server key is
+needed, only your own OpenRouter key). Click **Generate Demo Data** to index the 6-document synthetic corpus.
+
+The key you save is validated once against OpenRouter (D28), so asking a question does not pay a
+validation round-trip each time.
 
 ### Configuration
 
@@ -105,6 +109,8 @@ server sets `MASTER_API_KEY`, the server access key. Click **Generate Demo Data*
 | DELETE | `/api/v1/documents/{id}` | `202` — deletion saga |
 | POST | `/api/v1/ask` | SSE: `egress, guard, route, plan, tool*, retrieve, filter, generate*, verify, rewrite?, done` |
 | POST / GET | `/api/v1/compliance/{id}` | Evaluate / read the stored matrix; `GET .../export` → `.xlsx` |
+| POST | `/api/v1/compliance/{id}/stream` | Same evaluation as SSE: `start` → `progress` per requirement → `done` (drives the UI progress bar) |
+| POST | `/api/v1/auth/validate-key` | Validate the BYOK key once, on save; the server then skips per-request probes (D28) |
 | GET | `/api/v1/info` | Mode, provider, egress destination, role models, decision backend |
 | GET | `/api/v1/examples` | Starter questions |
 | POST | `/api/v1/admin/generate-synthetic-data`, `/api/v1/admin/test-model-capabilities` | Demo corpus; provider-reported facts for the configured models |
@@ -147,7 +153,7 @@ pipeline/retrieval check, not a model-quality claim:
 |---|---|---|---|
 | Recall@k (answer present in writer context) | 97.4% | ≥ 85% | lexical embeddings + BM25 |
 | False abstention (answerable questions) | 0.0% | – | |
-| Answer accuracy | 57.9% | – | stub copies one sentence; not a model score |
+| Answer accuracy | 52.6% | – | stub copies one sentence; not a model score |
 | Citation resolvability | 100% | 100% | |
 | Faithfulness | not measured | ≥ 95% | circular for an extractive stub |
 | Abstention accuracy (unanswerable) | 100% | ≥ 90% | |
@@ -160,9 +166,11 @@ pipeline/retrieval check, not a model-quality claim:
 Local Ollama is excluded from all standard test and evaluation plans due to slow local inference; standard testing uses the fast offline pipeline runner (`pytest`, `python -m app.cli.run_eval`) or OpenRouter cloud models.
 
 **Known limitations:** embeddings are lexical by default; graph extraction is pattern-based (titles,
-roles, credentials, "Project Title:" fields) and misses entities without such cues; spreadsheet formula
-cells without cached values are not extracted; small local judge models are noticeably less reliable
-than hosted ones and occasionally return malformed verdicts (the fallback handles these and reports it).
+roles, credentials, "Project Title:" fields) and misses entities without such cues; spreadsheet formulas
+stored without cached values are re-evaluated at extraction only for the safe arithmetic subset
+(`SUM(range)`, `+ - * /` over cell references) — `IF`/`VLOOKUP`/cross-sheet formulas stay empty;
+small local judge models are noticeably less reliable than hosted ones and occasionally return
+malformed verdicts (the fallback handles these and reports it).
 
 ## Deployment (Phase 2 — live at https://grantloom.taskmind-ai.com)
 

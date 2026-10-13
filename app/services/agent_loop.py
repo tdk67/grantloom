@@ -13,6 +13,8 @@ the evaluation exercise identical code.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Optional, Sequence
@@ -289,10 +291,21 @@ class AgentLoopOrchestrator:
         # 0. FR-Q10 egress / provenance: where data goes before any model call
         yield ("egress", self.egress)
 
-        # 1. G1 input guard
-        g1 = await self.planner.input_guard.evaluate(query, api_key)
+        # 1+2. G1 input guard and G2 strategy router depend only on the query: run both judge
+        # calls in parallel (latency). If G1 refuses, the routing result is discarded.
+        available = self.planner.available_strategies()
+        g1_task = asyncio.create_task(self.planner.input_guard.evaluate(query, api_key))
+        g2_task = asyncio.create_task(self.planner.strategy_router.evaluate(query, available, api_key))
+        try:
+            g1 = await g1_task
+        except BaseException:
+            g2_task.cancel()
+            raise
         yield ("guard", gate_event(g1))
         if not g1.passed:
+            g2_task.cancel()
+            with contextlib.suppress(Exception):
+                await g2_task
             refusal = g1.metadata.get("refusal") or g1.metadata.get("message") or "Your query was declined by the input guardrail."
             yield ("generate", {"token": refusal, "attempt": 0})
             yield ("done", {
@@ -301,10 +314,7 @@ class AgentLoopOrchestrator:
             })
             return
         sanitized = g1.metadata.get("sanitized_query", query)
-
-        # 2. G2 strategy router + plan
-        available = self.planner.available_strategies()
-        g2 = await self.planner.strategy_router.evaluate(sanitized, available, api_key)
+        g2 = await g2_task
         strategy = g2.metadata["strategy"]
         plan = AgentPlan(intent=g2.reason, strategy=strategy, selected_tools=self.planner.tools_for(strategy))
         yield ("route", gate_event(g2, strategy=strategy, available_strategies=available))
