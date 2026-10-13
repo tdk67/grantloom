@@ -304,7 +304,8 @@ class AgentLoopOrchestrator:
         yield ("guard", gate_event(g1))
         if not g1.passed:
             g2_task.cancel()
-            with contextlib.suppress(Exception):
+            # CancelledError is a BaseException in 3.12 — suppress it explicitly or the stream dies
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await g2_task
             refusal = g1.metadata.get("refusal") or g1.metadata.get("message") or "Your query was declined by the input guardrail."
             yield ("generate", {"token": refusal, "attempt": 0})

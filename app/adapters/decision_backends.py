@@ -245,6 +245,64 @@ class LLMJudgeDecisionBackend(DecisionBackendPort):
         return RequirementAssessment(verdict.status, evidence_chunk_id, verdict.rationale, self.name)
 
 
+class CorpusEvidenceDomainGuard(DecisionBackendPort):
+    """Wraps a semantic backend and corrects out-of-domain REFUSALS with objective corpus evidence.
+
+    A judge's opinion that a question is off-topic can be wrong for lab-operations detail questions
+    ("what uptime did the lab achieve..."). If the indexed corpus demonstrably contains the query's
+    vocabulary (best single-chunk overlap >= threshold), the refusal is overridden to in-domain —
+    labelled and logged, never silent. Manipulation verdicts are never overridden. Retrieval and G3
+    still decide whether the question is actually answerable (FR-Q8 abstention).
+    """
+
+    def __init__(self, inner: DecisionBackendPort, corpus_overlap: Callable[[str], float], threshold: float) -> None:
+        self.inner = inner
+        self.corpus_overlap = corpus_overlap
+        self.threshold = threshold
+
+    @property
+    def name(self) -> str:
+        return self.inner.name
+
+    @property
+    def supports_semantic_scan(self) -> bool:
+        return self.inner.supports_semantic_scan
+
+    async def route_query(self, query: str, available_strategies: Sequence[str], api_key: Optional[str] = None) -> GateVerdict:
+        return await self.inner.route_query(query, available_strategies, api_key)
+
+    async def judge_chunks(self, query: str, chunks: Sequence[DocumentChunk], api_key: Optional[str] = None) -> list[ChunkJudgement]:
+        return await self.inner.judge_chunks(query, chunks, api_key)
+
+    async def verify_claims(self, claims: Sequence[tuple[str, Sequence[str], str]], api_key: Optional[str] = None) -> list[ClaimJudgement]:
+        return await self.inner.verify_claims(claims, api_key)
+
+    async def scan_for_injection(self, chunks: Sequence[DocumentChunk], api_key: Optional[str] = None) -> dict[str, bool]:
+        return await self.inner.scan_for_injection(chunks, api_key)
+
+    async def assess_requirement(self, requirement_text: str, evidence_chunks: Sequence[DocumentChunk], api_key: Optional[str] = None) -> RequirementAssessment:
+        return await self.inner.assess_requirement(requirement_text, evidence_chunks, api_key)
+
+    async def screen_query(self, query: str, api_key: Optional[str] = None) -> GateVerdict:
+        verdict = await self.inner.screen_query(query, api_key)
+        if verdict.metadata.get("in_domain", True) or verdict.metadata.get("injection"):
+            return verdict
+        overlap = self.corpus_overlap(query)
+        if overlap >= self.threshold:
+            logger.info(
+                "G1 out-of-domain verdict overridden by corpus evidence (overlap %.2f >= %.2f) for query %.60r",
+                overlap, self.threshold, query,
+            )
+            return GateVerdict(
+                gate_id="G1",
+                passed=not verdict.metadata.get("manipulation", False),
+                confidence=round(overlap, 2),
+                reason=f"corpus_evidence_override (judge said out_of_domain; corpus_overlap={overlap:.2f})",
+                metadata={**verdict.metadata, "in_domain": True, "backend": f"{verdict.metadata.get('backend', self.inner.name)}+corpus_evidence"},
+            )
+        return verdict
+
+
 # ---------------------------------------------------------------------------------------------
 # Heuristic fallback
 # ---------------------------------------------------------------------------------------------

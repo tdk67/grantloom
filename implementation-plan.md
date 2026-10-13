@@ -43,7 +43,7 @@ Phase 2: VPS Deployment & Demo Verification (Linux 8 GB VPS)
 | **M7** | Agent Loop Alignment & Synthetic Evaluation Suite | **REWORKED (review-02)** | Single pipeline for API + eval; golden set rebuilt against the corpus; held-out adversarial set; faithfulness only via an independent judge on a real writer. Earlier "100% faithfulness" figures came from an extractive stub and are withdrawn. Current numbers: README § Evaluation. |
 | **M8** | VPS Dockerization & Host Monitoring Hook | **COMPLETED** | Multi-stage `Dockerfile` (python:3.12-slim, non-root) + `docker-compose.yml` (mem_limit 2.5 GB, loopback-published 8092, data volume); live RSS ~230 MB; `grantloom` job scraped by host Prometheus (target up) |
 | **M9** | Reverse Proxy, TLS & Master Key Protection | **COMPLETED** | nginx `grantloom.taskmind-ai.com` (Let's Encrypt, HTTP→HTTPS redirect), `proxy_buffering off` + 3600s read timeout for SSE, 30r/m per-IP limit (429), `/metrics` denied publicly; public BYOK mode per D27 (no master key; X-OpenRouter-Key live-probed, 401 RFC 7807 without it) |
-| **M10** | End-to-End Demo Rehearsal & Capstone Deliverables | **TODO** | Phase 2 pending |
+| **M10** | End-to-End Demo Rehearsal & Capstone Deliverables | **COMPLETED** | Playwright E2E suite (`e2e/run_e2e.py`) against the live HTTPS deployment: **11/11 flows passed** (ingestion, grounded query + citation drawer, injection refusal, compliance stream + xlsx export, Grafana, deletion saga, Prometheus); submission evidence PDF `e2e/GRANTLOOM_SUBMISSION.pdf`; found+fixed a real SSE refusal-stream bug (CancelledError vs parallel G1∥G2) |
 
 ---
 

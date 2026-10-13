@@ -126,6 +126,11 @@ pytest tests/integration/test_ask_pipeline.py -q       # one module
 pytest tests/integration/test_ask_pipeline.py::test_rewrite_exhaustion_returns_unverified_warning
 ```
 
+A Playwright E2E suite (`e2e/run_e2e.py`) exercises the **live deployment** through a real browser
+(ingestion, grounded query + citations, injection refusal, compliance streaming + xlsx export,
+Grafana, deletion saga) and produces `e2e/GRANTLOOM_SUBMISSION.pdf` as submission evidence — see
+[e2e/README.md](e2e/README.md).
+
 ## Evaluation
 
 `config/eval/golden_eval.json` holds 50 questions whose expected values were checked against the

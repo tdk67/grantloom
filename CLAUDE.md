@@ -25,6 +25,8 @@ python -m app.cli.run_eval --writer openrouter --decision llm_judge [--ids Q01,Q
 python -m app.cli.reindex                       # rebuild vectors after changing the embedding backend
 python -m app.cli.generate_synthetic            # demo corpus into database.synthetic_path
 docker compose build && docker compose up -d    # Phase 2 deploy (127.0.0.1:8092, nginx in front)
+python3 e2e/run_e2e.py                          # live-deployment Playwright E2E (one instance at a time)
+python3 e2e/make_submission_pdf.py              # -> e2e/GRANTLOOM_SUBMISSION.pdf
 ```
 
 No linter or type checker is configured. Don't run or wait on local Ollama models for testing (too slow); use the offline eval and pytest.

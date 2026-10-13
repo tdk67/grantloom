@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from app.adapters.decision_backends import (
+    CorpusEvidenceDomainGuard,
     FallbackDecisionBackend,
     HeuristicDecisionBackend,
     LLMJudgeDecisionBackend,
@@ -174,7 +175,9 @@ def build_decision_backend(
     heuristic = HeuristicDecisionBackend(settings.decision.heuristic, corpus_overlap)
     if settings.decision.backend == "heuristic":
         return heuristic
-    judge = LLMJudgeDecisionBackend(profile.client, profile.judge_model, settings.decision)
+    judge: DecisionBackendPort = LLMJudgeDecisionBackend(profile.client, profile.judge_model, settings.decision)
+    if corpus_overlap is not None:
+        judge = CorpusEvidenceDomainGuard(judge, corpus_overlap, settings.decision.heuristic.corpus_in_domain_overlap)
     return FallbackDecisionBackend(primary=judge, fallback=heuristic)
 
 
