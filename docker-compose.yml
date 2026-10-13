@@ -1,0 +1,30 @@
+# GrantLoom Phase 2 deployment (M8).
+# - Published on 127.0.0.1:8092 only; nginx (TLS, SSE, rate limit) is the public front.
+# - MASTER_API_KEY / OPENROUTER_API_KEY come from .env (never baked into the image).
+# - Memory capped at the PRD budget (< 2.5 GB).
+
+name: grantloom
+
+services:
+  grantloom:
+    build: .
+    image: grantloom:latest
+    container_name: grantloom
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8092:8000"
+    env_file: .env
+    environment:
+      GRANTLOOM_CONFIG_PATH: /etc/grantloom/config.json
+    volumes:
+      - grantloom_data:/app/data
+      - ./deploy/config.docker.json:/etc/grantloom/config.json:ro
+    mem_limit: 2560m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  grantloom_data:

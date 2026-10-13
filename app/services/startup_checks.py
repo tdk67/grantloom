@@ -21,13 +21,23 @@ class StartupCheckError(GrantLoomError):
 
 def run_startup_checks(settings: Settings) -> list[str]:
     """Raise on unsafe configurations; return warnings (also logged)."""
-    if settings.server.host not in LOOPBACK_HOSTS and not settings.secrets.master_api_key:
+    public_byok_demo = settings.server.public_byok and not settings.llm.private_mode
+    if settings.server.host not in LOOPBACK_HOSTS and not settings.secrets.master_api_key and not public_byok_demo:
         raise StartupCheckError(
             f"server.host is '{settings.server.host}' but no MASTER_API_KEY is set. Refusing to expose an "
-            "unauthenticated API on a non-loopback interface."
+            "unauthenticated API on a non-loopback interface (public BYOK mode requires "
+            "server.public_byok=true and llm.private_mode=false)."
         )
 
     warnings: list[str] = []
+    if public_byok_demo and not settings.secrets.master_api_key:
+        message = (
+            "D27 public BYOK mode: serving remote clients without a MASTER_API_KEY. LLM calls are gated "
+            "per request by the caller's X-OpenRouter-Key; document/admin endpoints are open and rely "
+            "on reverse-proxy rate limiting."
+        )
+        warnings.append(message)
+        logger.warning(message)
     pairs = [("OpenRouter", settings.models.writer_model, settings.models.judge_model)]
     pairs.append(("Ollama", settings.llm.ollama_writer_model, settings.llm.ollama_judge_model))
     active = "Ollama" if settings.llm.private_mode else "OpenRouter"

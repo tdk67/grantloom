@@ -4,7 +4,8 @@
 > solicitations against institutional documents and answers with citations that resolve to file,
 > page, line, sheet and row coordinates.
 
-**Status:** Phase 1 (native Windows, embedded stores) implemented; Phase 2 (Docker / VPS) not started.
+**Status:** Phase 1 (native Windows, embedded stores) implemented; Phase 2 deployed — live demo at
+**https://grantloom.taskmind-ai.com** (Docker on the project VPS, public BYOK mode).
 Test suite and evaluation numbers below are reproducible with the commands shown — see
 [Evaluation](#evaluation) for exactly what each number does and does not measure.
 
@@ -88,7 +89,12 @@ server sets `MASTER_API_KEY`, the server access key. Click **Generate Demo Data*
 * `models.embedding_backend`: `deterministic` (default; local lexical hashing — **not semantic**) or
   `openrouter` (needs `OPENROUTER_API_KEY`). Switching requires `python -m app.cli.reindex`.
 * Without `MASTER_API_KEY` the API only answers loopback clients, and the server refuses to start on a
-  non-loopback `server.host`.
+  non-loopback `server.host` — unless `server.public_byok: true` (public demo mode, D27): the instance
+  serves everyone, but every LLM-costing call still requires the caller's own `X-OpenRouter-Key`
+  (live-probed), and nginx applies per-IP rate limits. `public_byok` never applies to
+  `private_mode: true` (a public bind without a key would expose free local inference — startup refuses).
+* Models: writer `deepseek/deepseek-v4-flash`, judge `openai/gpt-4o-mini` (cheap, different families
+  per NFR-6). Swap via `models.writer_model` / `models.judge_model`.
 
 ## API
 
@@ -157,6 +163,26 @@ Local Ollama is excluded from all standard test and evaluation plans due to slow
 roles, credentials, "Project Title:" fields) and misses entities without such cues; spreadsheet formula
 cells without cached values are not extracted; small local judge models are noticeably less reliable
 than hosted ones and occasionally return malformed verdicts (the fallback handles these and reports it).
+
+## Deployment (Phase 2 — live at https://grantloom.taskmind-ai.com)
+
+Multi-stage `Dockerfile` (python:3.12-slim, non-root) + `docker-compose.yml`:
+
+```bash
+docker compose build && docker compose up -d   # serves 127.0.0.1:8092 (loopback only)
+```
+
+* `deploy/config.docker.json` (mounted read-only via `GRANTLOOM_CONFIG_PATH`) sets
+  `server.host: 0.0.0.0` and `server.public_byok: true` — the public demo runs **without a master
+  API key** (D27): every visitor supplies their own `X-OpenRouter-Key`, which is live-probed per
+  session; uploads/documents are open but rate-limited.
+* State lives in the `grantloom_data` Docker volume (`/app/data`: SQLite, Chroma, Kùzu, uploads);
+  memory is capped at 2.5 GB (actual ~230 MB).
+* nginx (`/etc/nginx/sites-available/grantloom.taskmind-ai.com`): TLS via Let's Encrypt with
+  HTTP→HTTPS redirect, `proxy_buffering off` + 3600 s timeouts for SSE, `limit_req` 30 r/m per IP
+  (burst 15, 429), and `/metrics` denied publicly (host Prometheus scrapes `127.0.0.1:8092` directly).
+* First-run demo data: `curl -X POST https://grantloom.taskmind-ai.com/api/v1/admin/generate-synthetic-data`
+  or the **Generate Demo Data** button in the UI.
 
 ## Repository layout
 

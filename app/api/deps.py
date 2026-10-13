@@ -197,6 +197,10 @@ def verify_master_api_key(
         if not x_api_key or x_api_key.strip() != expected_key.strip():
             raise AuthenticationError("Invalid or missing master API key in X-API-Key header.")
         return
+    if settings.server.public_byok:
+        # D27 public BYOK demo: no server key; LLM calls are individually gated by the
+        # caller's X-OpenRouter-Key (InferenceProfile.authorize) and rate limits.
+        return
     client_host = request.client.host if request.client else None
     if not _is_loopback(client_host):
         raise AuthenticationError(

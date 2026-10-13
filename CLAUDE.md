@@ -24,6 +24,7 @@ python -m app.cli.run_eval                      # offline pipeline smoke run (is
 python -m app.cli.run_eval --writer openrouter --decision llm_judge [--ids Q01,Q02] --json-out r.json  # needs OPENROUTER_API_KEY
 python -m app.cli.reindex                       # rebuild vectors after changing the embedding backend
 python -m app.cli.generate_synthetic            # demo corpus into database.synthetic_path
+docker compose build && docker compose up -d    # Phase 2 deploy (127.0.0.1:8092, nginx in front)
 ```
 
 No linter or type checker is configured. Don't run or wait on local Ollama models for testing (too slow); use the offline eval and pytest.
@@ -68,7 +69,7 @@ Up to `max_rewrite_attempts` rewrites follow, each starting with a `rewrite` eve
 - Deletion is a `deleting` outbox job (a saga), and `DELETE` returns 202. The PDF extractor strips running headers and footers, and retrieval suppresses near-duplicate chunks.
 - The Chroma collection stores the embedder fingerprint and refuses to mix embedding spaces.
 
-**Access:** every `/api/v1` router carries `Depends(verify_master_api_key)`. Without `MASTER_API_KEY`, only loopback clients are served. Startup (`app/services/startup_checks.py`) refuses a non-loopback host when no key is set. Rate limits use slowapi; endpoints need a `request: Request` parameter.
+**Access:** every `/api/v1` router carries `Depends(verify_master_api_key)`. Without `MASTER_API_KEY`, only loopback clients are served — unless `server.public_byok: true` (D27, used by the Docker deploy): remote clients are served without a server key, but every LLM call still requires the caller's live-probed `X-OpenRouter-Key`. Startup (`app/services/startup_checks.py`) refuses a non-loopback host when no key is set and `public_byok` is off, and refuses `public_byok` combined with `private_mode` (free local inference must never be public). Rate limits use slowapi; endpoints need a `request: Request` parameter. The VPS nginx adds TLS, SSE unbuffered proxying, per-IP `limit_req`, and blocks public `/metrics`.
 
 **Frontend:** a zero-build vanilla JS SPA in `app/static/` (decision D19). It uses `apiFetch()`, which attaches `X-API-Key` and `X-OpenRouter-Key` stored in IndexedDB.
 

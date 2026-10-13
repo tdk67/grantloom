@@ -27,6 +27,10 @@ class _Strict(BaseModel):
 class ServerConfig(_Strict):
     host: str
     port: int
+    # Public BYOK demo mode (decisions-log D27): serve non-loopback clients without a
+    # MASTER_API_KEY. Every LLM-costing call still requires the caller's own X-OpenRouter-Key
+    # (InferenceProfile.authorize); nginx/slowapi provide the rate limiting.
+    public_byok: bool
 
 
 class DatabaseConfig(_Strict):

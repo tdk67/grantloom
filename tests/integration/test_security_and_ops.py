@@ -60,6 +60,18 @@ async def test_without_master_key_only_loopback_clients_are_served(stack):
 
 
 @pytest.mark.asyncio
+async def test_public_byok_mode_serves_remote_clients_without_master_key(stack):
+    """D27: public BYOK demo — no server key, but LLM calls still require X-OpenRouter-Key."""
+    stack.settings = make_settings(server=make_settings().server.model_copy(update={"public_byok": True}))
+    app = stack.app(ScriptedLLM(), mode="byok")
+    async with _client(app, "203.0.113.7") as remote:
+        assert (await remote.get("/api/v1/documents")).status_code == 200
+        assert (await remote.get("/api/v1/examples")).status_code == 200
+        no_key = await remote.post("/api/v1/ask", json={"query": "what is the cost share?"})
+        assert no_key.status_code == 401
+
+
+@pytest.mark.asyncio
 async def test_capability_probe_rejects_caller_supplied_endpoints(stack):
     async with _client(stack.app(ScriptedLLM())) as client:
         ssrf = await client.post("/api/v1/admin/test-model-capabilities", json={"endpoint": "http://169.254.169.254/"})
@@ -74,6 +86,12 @@ def test_startup_refuses_public_bind_without_master_key():
     public = make_settings(server=make_settings().server.model_copy(update={"host": "0.0.0.0"}))
     with pytest.raises(StartupCheckError):
         run_startup_checks(public)
+    # D27: public_byok allows the keyless public bind in cloud mode (warning), never in private mode
+    byok = make_settings(server=make_settings().server.model_copy(update={"host": "0.0.0.0", "public_byok": True}))
+    assert any("public BYOK" in w for w in run_startup_checks(byok))
+    private = byok.model_copy(update={"llm": byok.llm.model_copy(update={"private_mode": True})})
+    with pytest.raises(StartupCheckError):
+        run_startup_checks(private)
     secured = public.model_copy(update={"secrets": SecretsConfig(_env_file=None, master_api_key=MASTER)})
     run_startup_checks(secured)
 

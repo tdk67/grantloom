@@ -1,7 +1,8 @@
 {
   "server": {
     "host": "127.0.0.1",
-    "port": 8000
+    "port": 8000,
+    "public_byok": false
   },
   "database": {
     "sqlite_path": "data/grantloom.db",
@@ -22,7 +23,7 @@
     "admin": "5/minute"
   },
   "models": {
-    "writer_model": "anthropic/claude-3.5-sonnet",
+    "writer_model": "deepseek/deepseek-v4-flash",
     "judge_model": "openai/gpt-4o-mini",
     "embedding_backend": "deterministic",
     "embedding_model": "text-embedding-3-small",

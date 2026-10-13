@@ -11,7 +11,7 @@ from typing import AsyncGenerator
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import make_asgi_app
 from slowapi.errors import RateLimitExceeded
@@ -88,6 +88,11 @@ def create_app() -> FastAPI:
         return response
 
     app.mount("/metrics", make_asgi_app())
+
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics_root() -> RedirectResponse:
+        # Starlette mounts only match '/metrics/...'; serve the bare path too (Prometheus default).
+        return RedirectResponse(url="/metrics/")
 
     app.include_router(documents_router)
     app.include_router(ask_router)
