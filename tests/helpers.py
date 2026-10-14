@@ -12,7 +12,7 @@ from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 
 from app.adapters.chroma_adapter import ChromaVectorStoreAdapter
-from app.adapters.decision_backends import HeuristicDecisionBackend
+from tests.stub_backend import StubDecisionBackend
 from app.adapters.embedder_adapter import DeterministicEmbedder
 from app.adapters.kuzu_adapter import KuzuGraphStoreAdapter
 from app.adapters.sqlite_registry import SqliteRegistryAdapter
@@ -198,7 +198,7 @@ def build_stack(tmp_path: Path, settings: Optional[Settings] = None, decision: O
         str(db_file), SqlGuard(settings.sql_guard.max_rows, settings.sql_guard.timeout_seconds)
     )
     graph_store = KuzuGraphStoreAdapter(str(tmp_path / "kuzudb"))
-    decision = decision or HeuristicDecisionBackend(settings.decision.heuristic, lambda q: corpus_overlap(registry, q))
+    decision = decision or StubDecisionBackend(lambda q: corpus_overlap(registry, q))
     key_vault = EphemeralKeyVault()
     worker = IngestWorker(
         registry=registry,

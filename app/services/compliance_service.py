@@ -58,7 +58,7 @@ class ComplianceService:
         self.evidence_candidates = settings.compliance.evidence_candidates
         self.max_concurrent_assessments = settings.compliance.max_concurrent_assessments
         self.rrf_k = settings.retrieval.rrf_k
-        lexicon = load_json_template("decision/heuristic_lexicon.json")
+        lexicon = load_json_template("extraction/extraction_lexicon.json")
         self.markers: list[str] = lexicon["requirement_markers"]
         self.categories: dict[str, list[str]] = lexicon["requirement_categories"]
 

@@ -1,7 +1,8 @@
 """Offline evaluation run: exercises the real pipeline in an isolated workspace.
 
-This is a pipeline regression check, not a quality claim: the offline writer is an extractive stub
-(faithfulness is deliberately not measured) and embeddings are lexical. Quality numbers come from
+This is a pipeline regression check, not a quality claim: the offline writer is an extractive stub,
+the decision backend is an injected lexical test double (tests/stub_backend.py — production eval
+requires a real judge, decisions-log D31), and embeddings are lexical. Quality numbers come from
 `python -m app.cli.run_eval --writer openrouter --decision llm_judge` (see README).
 """
 
@@ -13,6 +14,8 @@ import pytest
 
 from app.cli.run_eval import DEFAULT_GOLDEN, DEFAULT_HELDOUT, run_evaluation
 from app.core.config import get_settings
+from app.services.retrieval_service import corpus_overlap
+from tests.stub_backend import StubDecisionBackend
 
 
 @pytest.mark.asyncio
@@ -21,7 +24,10 @@ async def test_offline_eval_pipeline_regression(tmp_path: Path):
     live_db = Path(get_settings().database.sqlite_path)
     live_mtime = live_db.stat().st_mtime if live_db.exists() else None
 
-    report = await run_evaluation(workspace=tmp_path / "eval")
+    report = await run_evaluation(
+        workspace=tmp_path / "eval",
+        decision_backend_factory=lambda registry: StubDecisionBackend(lambda q: corpus_overlap(registry, q)),
+    )
     m = report["metrics"]
 
     assert report["counts"] == {**report["counts"], "answerable": 38, "unanswerable": 7, "adversarial_canonical": 5, "adversarial_heldout": 15}

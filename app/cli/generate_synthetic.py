@@ -2,7 +2,6 @@
 
 import argparse
 from pathlib import Path
-import sys
 
 from app.core.config import get_settings
 from app.synthetic.generator import SyntheticDataGenerator

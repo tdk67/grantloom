@@ -102,20 +102,24 @@ class HybridRetrievalService:
                 errors=errors,
             )
 
-        # 3. FR-Q8 abstention check
+        # 3. FR-Q8 abstention check. The two signals live on different scales and are calibrated
+        # separately (review-04 C2): dense cosine >= retrieval.min_relevance_threshold OR lexical
+        # overlap >= retrieval.min_bm25_overlap. An empty query has no tokens -> overlap 0.0.
         max_dense_score = max((r.score for r in dense_results), default=0.0)
         query_tokens = set(content_tokens(query))
         best_overlap = 0
         for b_res in bm25_results[:5]:
             best_overlap = max(best_overlap, len(query_tokens & set(TOKEN_RE.findall(b_res.text.lower()))))
 
-        bm25_overlap_ratio = (best_overlap / len(query_tokens)) if query_tokens else (1.0 if bm25_results else 0.0)
+        bm25_overlap_ratio = (best_overlap / len(query_tokens)) if query_tokens else 0.0
+        dense_relevant = max_dense_score >= cfg.min_relevance_threshold
+        keyword_relevant = bm25_overlap_ratio >= cfg.min_bm25_overlap
         max_relevance_signal = max(max_dense_score, bm25_overlap_ratio)
 
-        if max_relevance_signal < cfg.min_relevance_threshold:
+        if not (dense_relevant or keyword_relevant):
             logger.info(
-                "Abstention: fused relevance signal %.3f below threshold %.3f (dense=%.3f, bm25_overlap=%.3f).",
-                max_relevance_signal, cfg.min_relevance_threshold, max_dense_score, bm25_overlap_ratio,
+                "Abstention: no relevant evidence (dense=%.3f < %.3f and bm25_overlap=%.3f < %.3f).",
+                max_dense_score, cfg.min_relevance_threshold, bm25_overlap_ratio, cfg.min_bm25_overlap,
             )
             return result([], max_relevance_signal, True)
 
@@ -149,7 +153,7 @@ class HybridRetrievalService:
             logger.info("Abstention: no active chunks retained after fusion.")
             return result([], 0.0, True)
 
-        keyword_score = round(bm25_overlap_ratio, 2) if (bm25_overlap_ratio >= cfg.min_relevance_threshold and query_tokens) else 0.0
+        keyword_score = round(bm25_overlap_ratio, 2) if keyword_relevant else 0.0
         return result(retained, max(max_dense_score, min(1.0, keyword_score)), False)
 
 

@@ -1,10 +1,11 @@
 """Abstract Decision Backend Port: typed verdicts for gates G1-G4, Tier-2 scans, and compliance.
 
 Implementations (app/adapters/decision_backends.py):
-- LLMJudgeDecisionBackend: prompt-based judge (PRD §8.3 `PromptJudgeAdapter`, v1 default).
-- HeuristicDecisionBackend: regex/lexical fallback (data-strategy §3.6 `fallback` mode).
-- FallbackDecisionBackend: primary -> fallback chain that labels every verdict with the backend used.
-Jev and Julia-1 are deferred (decisions-log D22); they would be further implementations of this port.
+- LLMJudgeDecisionBackend: prompt-based judge (PRD §8.3 `PromptJudgeAdapter`). Serves both the
+  `llm_judge` backend (v1 default) and the `jev` backend (TypeSafe Jev decision model) via a label.
+- CorpusEvidenceDomainGuard: decorator overriding false out-of-domain refusals with corpus evidence.
+There is deliberately no heuristic or fallback implementation (decisions-log D31); Julia-1 remains
+decision (D22). A failed backend raises DecisionBackendError — verdicts degrade loudly, never silently.
 """
 
 from __future__ import annotations

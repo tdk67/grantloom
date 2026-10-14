@@ -32,7 +32,7 @@ def load_template(relative_path: str) -> str:
 
 @lru_cache(maxsize=16)
 def load_json_template(relative_path: str) -> Any:
-    """Load and parse a JSON data template (e.g. the heuristic decision lexicon)."""
+    """Load and parse a JSON data template (e.g. the extraction lexicon)."""
     return json.loads(load_template(relative_path))
 
 

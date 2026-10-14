@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 from app.core.config import IngestionConfig
-from app.core.errors import GrantLoomError
+from app.core.errors import GrantLoomError, StorageError
 from app.core.metrics import CHUNKS, DOCUMENTS, INGESTION_JOBS, VECTORS
 from app.ports.embedder import EmbedderPort
 from app.ports.graph_store import GraphStorePort
@@ -213,8 +213,10 @@ class IngestWorker:
         except GrantLoomError as exc:
             self._fail(job, doc, exc.detail)
         except Exception as exc:  # unexpected bug: record it on the job instead of killing the worker loop
+            # str(exc) can contain paths or SQL fragments and error_message is surfaced in the UI:
+            # log the detail, show only the exception type (review-04 C1).
             logger.exception("Unexpected ingestion failure for '%s'.", doc.doc_id)
-            self._fail(job, doc, f"{type(exc).__name__}: {exc}")
+            self._fail(job, doc, f"Internal ingestion error ({type(exc).__name__}); details in the server log.")
 
     def _fail(self, job: OutboxJob, doc: DocumentRecord, error: str) -> None:
         retry = self.registry.retry_or_fail_job(job.job_id, error, self.config.max_job_attempts)
@@ -244,7 +246,12 @@ class IngestWorker:
             INGESTION_JOBS.labels(outcome="deleted").inc()
             logger.info("Deletion saga completed for '%s'.", doc.doc_id)
         except (GrantLoomError, OSError) as exc:
-            detail = exc.detail if isinstance(exc, GrantLoomError) else str(exc)
+            if isinstance(exc, GrantLoomError):
+                detail = exc.detail
+            else:
+                # OSError strings embed filesystem paths; those stay in the log (review-04 C1).
+                logger.exception("Deletion saga for '%s' hit an OS error.", doc.doc_id)
+                detail = f"Internal storage error ({type(exc).__name__}); details in the server log."
             retry = self.registry.retry_or_fail_job(job.job_id, detail, self.config.max_job_attempts)
             self.registry.update_document_state(
                 doc.doc_id, state="deleting", error_message=f"Deletion {'will retry' if retry else 'failed'}: {detail}",

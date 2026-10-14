@@ -88,6 +88,19 @@ class GrantLoomError(Exception):
         return payload
 
 
+def internal_server_problem(correlation_id: str) -> dict[str, Any]:
+    """Problem details for an unexpected error surfaced to a client.
+
+    Deliberately generic (review-04 C1): internal exception strings can contain paths, model names,
+    SQL fragments, or upstream error bodies, so they are logged server-side only. The correlation id
+    lets an operator find the full traceback in the logs.
+    """
+    return GrantLoomError(
+        f"Unexpected internal error (correlation id: {correlation_id}). The details were logged server-side.",
+        instance=correlation_id,
+    ).to_problem_details()
+
+
 class NotFoundError(GrantLoomError):
     default_status = 404
     default_title = "Resource Not Found"

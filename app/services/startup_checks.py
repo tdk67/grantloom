@@ -46,8 +46,4 @@ def run_startup_checks(settings: Settings) -> list[str]:
             message = f"NFR-6 evaluator independence ({provider}{', active' if provider == active else ''}): {problem}"
             warnings.append(message)
             logger.warning(message)
-    if settings.decision.backend == "heuristic":
-        message = "Decision backend is 'heuristic': G1/G2/G4 use lexical rules only and Tier-2 ingestion scanning is off."
-        warnings.append(message)
-        logger.warning(message)
     return warnings

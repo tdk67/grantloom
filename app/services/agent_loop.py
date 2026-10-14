@@ -407,6 +407,18 @@ class AgentLoopOrchestrator:
             })
 
         assert result is not None
+        if not result.citations:
+            # An answer without proper citations is not accepted: after every rewrite attempt the
+            # draft still has no resolvable [chunk_id] citation, so it is discarded and reported as
+            # "no answer found" instead of being surfaced as unverified prose.
+            logger.warning("Final draft discarded: no resolvable citations after %d attempt(s).", attempt)
+            yield ("done", {
+                "answer": ABSTENTION_MESSAGE, "citations": [], "confidence_score": 0.0, "abstention": True,
+                "strategy": strategy, "verified": False, "attempts": attempt,
+                "warning": "The generated draft cited no verifiable source and was discarded.",
+                "context_chunk_ids": context_ids, "tool_executions": [e.__dict__ for e in outcome.tool_executions],
+            })
+            return
         verified = result.passed
         done: dict[str, Any] = {
             "answer": result.cleaned_text,

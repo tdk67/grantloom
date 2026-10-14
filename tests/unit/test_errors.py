@@ -1,7 +1,5 @@
 """Unit tests for RFC 7807 problem details exception hierarchy."""
 
-import pytest
-
 from app.core.errors import (
     AuthenticationError,
     DatabaseMigrationError,
@@ -10,7 +8,6 @@ from app.core.errors import (
     NotFoundError,
     PaymentRequiredError,
     PayloadTooLargeError,
-    RateLimitExceededError,
     SecurityGuardError,
     UnsupportedMediaTypeError,
     ValidationError,

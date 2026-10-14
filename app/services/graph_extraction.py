@@ -29,12 +29,16 @@ ROLE = (
     r"(?:Co-Principal Investigator|Principal Investigator|Lead Investigator|Co-Investigator|Co-PI|"
     r"Project Director|Program Director|Lead Author|Author|Investigator|Key Personnel|Faculty Lead)"
 )
+# NAME capture relies on capitalization to identify proper nouns, so the patterns must NOT be
+# globally case-insensitive (review-04 C4: IGNORECASE made "Name: solar grid" a person). Role and
+# field keywords use scoped (?i:...) groups instead; the NAME group stays case-sensitive.
 TITLED_PERSON_RE = re.compile(rf"\b{TITLE}[ ]({NAME})")
-ROLE_PERSON_RE = re.compile(rf"\b{ROLE}(?:[ ]\(PI\))?[ ]*[:\-–—]?[ ]*(?:is[ ]+)?(?:{TITLE}[ ]+)?({NAME})", re.IGNORECASE)
-FIELD_PERSON_RE = re.compile(rf"\b(?:Name|Author|Lead):[ ]*(?:{TITLE}[ ]+)?({NAME})", re.IGNORECASE)
+ROLE_PERSON_RE = re.compile(rf"\b(?i:{ROLE})(?:[ ]\(PI\))?[ ]*[:\-–—]?[ ]*(?:[iI]s[ ]+)?(?:{TITLE}[ ]+)?({NAME})")
+FIELD_PERSON_RE = re.compile(rf"\b(?i:Name|Author|Lead):[ ]*(?:{TITLE}[ ]+)?({NAME})")
 CREDENTIAL_PERSON_RE = re.compile(rf"\b({NAME}),[ ]+(?:Ph\.D\.|M\.D\.|M\.S\.|M\.Sc\.|M\.A\.|MBA|B\.S\.)")
 ORG_ACRONYM_RE = re.compile(r"((?:[A-Z][a-zA-Z.]*[ ](?:of[ ](?:the[ ])?|for[ ]|and[ ])?){1,7}[A-Z][a-zA-Z.]*)[ ]\(([A-Z]{2,8})\)")
-PROJECT_TITLE_RE = re.compile(r"(?:Project Title|Title of Project|Project Name|Proposal Title|Award)[ ]*:[ ]*([^\n]{8,160})", re.IGNORECASE)
+# "Award:" is deliberately NOT a project-title field: it introduces budget text, not a title (review-04 C4).
+PROJECT_TITLE_RE = re.compile(r"\b(?i:Project Title|Title of Project|Project Name|Proposal Title)[ ]*:[ ]*([^\n]{8,160})")
 REQUIREMENT_MAX_CHARS = 400
 
 
@@ -56,7 +60,7 @@ class _Extraction:
 
 class GraphEntityExtractor:
     def __init__(self) -> None:
-        lexicon = load_json_template("decision/heuristic_lexicon.json")
+        lexicon = load_json_template("extraction/extraction_lexicon.json")
         self.non_name_words = set(lexicon["non_name_words"])
         self.funder_keywords = set(lexicon["funder_keywords"])
         self.funding_cues = lexicon["funding_cues"]

@@ -179,7 +179,11 @@ For calibration, we need **50 manually curated Q&A pairs** across 5 query catego
 
 ## Part 3: Jev Decision Model for Guardrails & RAG Routing
 
-> **Status (2026-10-13, decisions-log D22): Jev and Julia-1 are deferred and not implemented.** The gates below run on the `DecisionBackendPort` with the prompt-based `llm_judge` backend (default) and the regex/lexical `heuristic` fallback described in §3.6. Configuring `decision.backend: "jev"` or `"julia1"` is rejected at startup. This part remains the design target for a future Jev/Julia-1 adapter.
+> **Status (2026-10-15, decisions-log D31): `jev` is implemented over OpenRouter** (`decision.backend: "jev"`,
+> model `decision.jev_model`) as the same prompt-based judge implementation with its own label.
+> **Julia-1 remains deferred (D22).** The regex/lexical `heuristic` fallback mode described in §3.6
+> was **removed from production**: the only offline lexical backend is a test double
+> (`tests/stub_backend.py`). §3.6 below is historical design text, not current behavior.
 
 ### 3.1 What Is Jev?
 
@@ -376,6 +380,10 @@ The Jev request/response shapes in the vendor docs (`jevmodel.org/docs`) are map
 At $0.00035 per query, 10,000 queries costs $3.50. Negligible.
 
 ### 3.6 Backends, Modes & Fallback
+
+> **Superseded by decisions-log D31:** automatic fallback chains were removed. A failed judge raises
+> `DECISION_BACKEND_ERROR` after bounded retries (`decision.max_retries`, metered as
+> `grantloom_decision_retries_total`); nothing silently degrades to keyword rules. Kept for history:
 
 | Mode | Decision backend | Data leaves machine? | Purpose |
 |------|------------------|----------------------|---------|

@@ -72,7 +72,9 @@ class RetrievalConfig(_Strict):
     dense_top_k: int
     bm25_top_k: int
     rrf_k: int
-    min_relevance_threshold: float
+    min_relevance_threshold: float  # dense cosine floor for the abstention check (FR-Q8)
+    min_bm25_overlap: float  # lexical-overlap floor for the abstention check; calibrated separately
+    # from the dense cosine score because the two signals live on different scales (review-04 C2)
     rerank_top_k: int
     top_k_after_filter: int
     max_structured_tables: int
@@ -99,18 +101,12 @@ class GuardrailsConfig(_Strict):
     taint_threshold_chunks: int
     tier2_sample_rate: float
     max_query_chars: int
+    citation_excerpt_chars: int  # evidence excerpt length returned per citation (review-04 C6)
 
 
 class LLMJudgeConfig(_Strict):
     max_chunk_chars: int
     max_tier2_chunks_per_call: int
-
-
-class HeuristicConfig(_Strict):
-    grounded_overlap: float = 0.5
-    satisfied_overlap: float = 0.5
-    partial_overlap: float = 0.25
-    corpus_in_domain_overlap: float = 0.5
 
 
 DEFERRED_DECISION_BACKENDS = {"julia1"}
@@ -126,8 +122,10 @@ class DecisionConfig(_Strict):
     max_retries: int = 3
     retry_delay_seconds: float = 1.0
     llm_judge: LLMJudgeConfig
-    fallback_backend: Optional[str] = None
-    heuristic: Optional[HeuristicConfig] = None
+    # Corpus-evidence override for false out-of-domain refusals (G1). Explicit config, identical
+    # in dev and Docker (review-04 A2): no implicit gating on other blocks.
+    corpus_evidence_guard: bool
+    corpus_in_domain_overlap: float
 
     @field_validator("backend")
     @classmethod
@@ -137,7 +135,12 @@ class DecisionConfig(_Strict):
                 f"Decision backend '{value}' is deferred and not implemented (see decisions-log.md D22). "
                 "Use 'llm_judge' or 'jev'."
             )
-        if value not in ("llm_judge", "jev", "heuristic"):
+        if value == "heuristic":
+            raise ValueError(
+                "The heuristic decision backend was removed from production (decisions-log D31): "
+                "keyword rules cannot judge meaning or catch paraphrased injections. Use 'llm_judge' or 'jev'."
+            )
+        if value not in ("llm_judge", "jev"):
             raise ValueError(f"Unknown decision backend '{value}'. Use 'llm_judge' or 'jev'.")
         return value
 

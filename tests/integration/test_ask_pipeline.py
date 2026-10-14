@@ -84,7 +84,7 @@ async def test_successful_query_with_resolved_citations(stack, tmp_path):
     assert res.status_code == 200
     event_map = dict(events)
     assert event_map["egress"]["provider"] == "scripted"
-    assert event_map["guard"]["backend"] == "heuristic"
+    assert event_map["guard"]["backend"] == "stub"
     done = event_map["done"]
     assert done["abstention"] is False and done["verified"] is True
     citation = done["citations"][0]
@@ -96,7 +96,9 @@ async def test_successful_query_with_resolved_citations(stack, tmp_path):
 
 @pytest.mark.asyncio
 async def test_citation_outside_context_is_stripped(stack, tmp_path):
-    """A real chunk id that was not in the writer's context is not a valid citation."""
+    """A real chunk id that was not in the writer's context is not a valid citation, and a final
+    draft left with zero resolvable citations is discarded — an uncited answer is not accepted
+    (review-04 / FR-Q7); the pipeline reports "no answer found" instead."""
     doc_id = await _ingest_solicitation(stack, tmp_path)
     chunks = stack.registry.get_chunks_for_document(doc_id)
     outsider = "doc_other:9:9"
@@ -104,7 +106,10 @@ async def test_citation_outside_context_is_stripped(stack, tmp_path):
     res, events = await _ask(stack.app(llm), "What is the equipment threshold?")
     done = dict(events)["done"]
     assert outsider not in done["answer"]
-    assert done["verified"] is False and done["warning"] == UNVERIFIED_WARNING
+    assert done["answer"] == ABSTENTION_MESSAGE
+    assert done["abstention"] is True and done["citations"] == []
+    assert done["verified"] is False and done["confidence_score"] == 0.0
+    assert "cited no verifiable source" in done["warning"]
     assert chunks  # corpus exists, the citation was simply invalid
 
 
@@ -164,15 +169,15 @@ async def test_refusal_completes_while_router_call_is_in_flight(tmp_path):
     """
     import asyncio
 
-    from app.adapters.decision_backends import HeuristicDecisionBackend
     from tests.helpers import build_stack
+    from tests.stub_backend import StubDecisionBackend
 
-    class SlowRouter(HeuristicDecisionBackend):
+    class SlowRouter(StubDecisionBackend):
         async def route_query(self, query, available_strategies, api_key=None):
             await asyncio.sleep(30)
             return await super().route_query(query, available_strategies, api_key)
 
-    stack = build_stack(tmp_path, decision=SlowRouter(make_settings().decision.heuristic, None))
+    stack = build_stack(tmp_path, decision=SlowRouter(None))
     try:
         await _ingest_solicitation(stack, tmp_path)
         app = stack.app(ScriptedLLM())

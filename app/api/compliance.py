@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import json
+import logging
+import uuid
 from typing import AsyncIterator, Optional
 
 from fastapi import APIRouter, Depends, Header, Request, Response
 from fastapi.responses import StreamingResponse
 
 from app.api.deps import get_compliance_service, get_inference_profile, verify_master_api_key
-from app.core.errors import GrantLoomError
+from app.core.errors import GrantLoomError, internal_server_problem
 from app.core.rate_limit import compliance_limit, limiter
 from app.services.compliance_service import ComplianceService
 from app.services.inference import InferenceProfile
+
+logger = logging.getLogger("grantloom.api.compliance")
 
 router = APIRouter(prefix="/api/v1/compliance", tags=["compliance"], dependencies=[Depends(verify_master_api_key)])
 
@@ -52,8 +56,11 @@ async def evaluate_compliance_stream(
                 yield f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
         except GrantLoomError as exc:
             yield f"event: error\ndata: {json.dumps(exc.to_problem_details())}\n\n"
-        except Exception as exc:
-            yield f"event: error\ndata: {json.dumps({'title': 'Compliance Evaluation Error', 'detail': str(exc), 'status': 500})}\n\n"
+        except Exception:
+            # Never leak str(exc) to clients, and never fail silently (review-04 C1).
+            correlation_id = uuid.uuid4().hex[:12]
+            logger.exception("Compliance streaming failed (correlation %s)", correlation_id)
+            yield f"event: error\ndata: {json.dumps(internal_server_problem(correlation_id))}\n\n"
 
     return StreamingResponse(
         sse_event_stream(),

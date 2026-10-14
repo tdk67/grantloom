@@ -54,3 +54,19 @@ async def test_crawler_endpoints_and_static_frontend():
         res_js = await client.get("/app.js")
         assert res_js.status_code == 200
         assert "grantloom_db" in res_js.text
+
+
+def test_app_js_has_no_duplicate_function_declarations():
+    """review-04 B4 regression: `loadStarterPrompts` was declared twice in app.js. JS hoisting made
+    the last declaration silently win, so the earlier one (and `window.useStarterPrompt`) was dead
+    code no test caught. Duplicate top-level function declarations must fail the suite."""
+    from collections import Counter
+    from pathlib import Path
+    import re
+
+    source = Path(__file__).resolve().parents[2] / "app" / "static" / "app.js"
+    names = re.findall(r"^(?:async\s+)?function\s+([A-Za-z0-9_$]+)", source.read_text(encoding="utf-8"), re.M)
+    duplicates = {n: c for n, c in Counter(names).items() if c > 1}
+    assert not duplicates, f"duplicate function declarations in app.js: {duplicates}"
+    assert names.count("loadStarterPrompts") == 1
+    assert "useStarterPrompt" not in source.read_text(encoding="utf-8")

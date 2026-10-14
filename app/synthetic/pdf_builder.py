@@ -1,7 +1,7 @@
 """High-fidelity PDF document builder with running headers, footers, and two-pass page numbering."""
 
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
@@ -9,7 +9,6 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.pdfgen import canvas
 from reportlab.platypus import (
     HRFlowable,
-    KeepTogether,
     PageBreak,
     Paragraph,
     SimpleDocTemplate,

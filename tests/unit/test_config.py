@@ -73,6 +73,42 @@ def test_jev_decision_backend_valid_loading(tmp_path: Path):
     assert settings.decision.backend == "jev"
 
 
+def test_heuristic_backend_is_rejected_with_pointer(tmp_path: Path):
+    """D31: the keyword rule engine is no longer a production decision backend."""
+    data = _config()
+    data["decision"]["backend"] = "heuristic"
+    with pytest.raises(ValidationError) as exc_info:
+        load_settings(config_path=_write(tmp_path, data))
+    assert "D31" in str(exc_info.value)
+
+
+def test_removed_fallback_keys_are_rejected(tmp_path: Path):
+    """Strict config (extra=forbid) must reject the removed fallback keys, not silently ignore them."""
+    data = _config()
+    data["decision"]["fallback_backend"] = "heuristic"
+    with pytest.raises(ValidationError):
+        load_settings(config_path=_write(tmp_path, data))
+
+
+def _flat_keys(d: dict, prefix: str = "") -> set[str]:
+    keys: set[str] = set()
+    for k, v in d.items():
+        keys.add(prefix + k)
+        if isinstance(v, dict):
+            keys |= _flat_keys(v, prefix + k + ".")
+    return keys
+
+
+def test_docker_config_matches_dev_config_key_set(tmp_path: Path):
+    """review-04 A2: deploy/config.docker.json must not drift from config/config.json.
+    Only deliberate value overrides (server.host, server.public_byok) may differ."""
+    dev = _config()
+    docker = json.loads((PROJECT_ROOT / "deploy" / "config.docker.json").read_text(encoding="utf-8"))
+    assert _flat_keys(dev) == _flat_keys(docker), "config key sets diverged between dev and docker"
+    settings = load_settings(config_path=PROJECT_ROOT / "deploy" / "config.docker.json", env_file=tmp_path / ".empty")
+    assert settings.decision.backend == dev["decision"]["backend"]
+    assert settings.decision.corpus_evidence_guard == dev["decision"]["corpus_evidence_guard"]
+
 
 def test_missing_file_raises_not_found(tmp_path: Path):
     with pytest.raises(FileNotFoundError):

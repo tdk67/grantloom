@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from typing import AsyncIterator, Optional
 
 from fastapi import APIRouter, Body, Depends, Header, Request, status
@@ -11,7 +12,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.api.deps import get_ask_service, get_inference_profile, verify_master_api_key
-from app.core.errors import GrantLoomError
+from app.core.errors import GrantLoomError, internal_server_problem
 from app.core.rate_limit import ask_limit, limiter
 from app.services.ask_service import AskService
 from app.services.inference import InferenceProfile
@@ -44,9 +45,11 @@ async def ask_endpoint(
                 yield f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
         except GrantLoomError as exc:
             yield f"event: error\ndata: {json.dumps(exc.to_problem_details())}\n\n"
-        except Exception as exc:
-            logger.exception("Ask streaming failed: %s", exc)
-            yield f"event: error\ndata: {json.dumps({'title': 'Inference Error', 'detail': str(exc), 'status': 500})}\n\n"
+        except Exception:
+            # Never leak str(exc) to clients (review-04 C1): log it, send a correlation id.
+            correlation_id = uuid.uuid4().hex[:12]
+            logger.exception("Ask streaming failed (correlation %s)", correlation_id)
+            yield f"event: error\ndata: {json.dumps(internal_server_problem(correlation_id))}\n\n"
 
     return StreamingResponse(
         sse_event_stream(),

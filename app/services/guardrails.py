@@ -242,9 +242,10 @@ class OutputGuard:
 
     MIN_CLAIM_TOKENS = 3
 
-    def __init__(self, registry: RegistryPort, decision_backend: DecisionBackendPort) -> None:
+    def __init__(self, registry: RegistryPort, decision_backend: DecisionBackendPort, citation_excerpt_chars: int) -> None:
         self.registry = registry
         self.decision_backend = decision_backend
+        self.citation_excerpt_chars = citation_excerpt_chars
 
     def resolve_citations(
         self,
@@ -270,7 +271,7 @@ class OutputGuard:
                         line=f"{chunk.line_start}-{chunk.line_end}" if chunk.line_start is not None else None,
                         sheet=chunk.sheet_name,
                         row=f"{chunk.row_start}-{chunk.row_end}" if chunk.row_start is not None else None,
-                        excerpt=chunk.text_content[:2500].strip(),
+                        excerpt=chunk.text_content[: self.citation_excerpt_chars].strip(),
                         verified=True,
                     )
                 )

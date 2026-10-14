@@ -202,7 +202,7 @@ async function loadServerInfo() {
   elements.serverModeInfo.textContent =
     `Mode: ${info.mode === "private" ? "private (local models)" : "BYOK (cloud)"} · ` +
     `writer ${info.writer_model} · judge ${info.judge_model} via ${info.provider} (${info.destination}) · ` +
-    `decisions: ${info.decision_backend}${info.decision_fallback ? " → " + info.decision_fallback : ""} · ` +
+    `decisions: ${info.decision_backend} · ` +
     `embeddings: ${info.embeddings}`;
 
   const needsKey = info.requires_byok_key && !(state.apiKey && state.apiKey.trim().length > 10);
@@ -714,37 +714,7 @@ async function exportComplianceExcel() {
 }
 
 // ==============================================================================
-// 9. Starter Prompts
-// ==============================================================================
-
-async function loadStarterPrompts() {
-  try {
-    const res = await apiFetch("/api/v1/examples");
-    if (!res.ok) return;
-    const examples = await res.json();
-    elements.starterPromptsList.innerHTML = examples
-      .map((ex, idx) => `
-        <div class="starter-prompt-card" data-idx="${idx}">
-          <span class="starter-prompt-category">${escapeHtml(ex.category)}</span>
-          ${escapeHtml(ex.question)}
-        </div>`)
-      .join("");
-    elements.starterPromptsList.querySelectorAll(".starter-prompt-card").forEach((card) => {
-      card.addEventListener("click", () => window.useStarterPrompt(examples[Number(card.dataset.idx)].question));
-    });
-  } catch (err) {
-    console.error("Failed to load starter prompts:", err);
-  }
-}
-
-window.useStarterPrompt = function (text) {
-  switchTab("qa");
-  elements.chatInput.value = text;
-  elements.chatInput.focus();
-};
-
-// ==============================================================================
-// 10. Settings & Diagnostics
+// 9. Settings & Diagnostics
 // ==============================================================================
 
 function openSettingsModal() {
@@ -853,7 +823,7 @@ function escapeHtml(str) {
 }
 
 // ==============================================================================
-// 10. Curated Starter Prompts Loader
+// 10. Starter Prompts (curated examples loader)
 // ==============================================================================
 
 async function loadStarterPrompts() {

@@ -66,7 +66,7 @@ class AskService:
             planner=planner,
             retriever=retriever,
             writer=WriterAgent(llm_client, writer_model, registry),
-            validator=ValidatorAgent(OutputGuard(registry, decision_backend)),
+            validator=ValidatorAgent(OutputGuard(registry, decision_backend, settings.guardrails.citation_excerpt_chars)),
             settings=settings,
             egress=egress,
         )

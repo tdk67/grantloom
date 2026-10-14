@@ -118,10 +118,14 @@ Browser SPA (vanilla JS)  ──HTTP/SSE──▶  FastAPI  (X-API-Key, rate lim
 
 The **decision backend** (`decision.backend`) supports:
 * `llm_judge`: a prompt-based judge on the configured judge model (OpenRouter or Ollama).
-* `jev`: high-speed, non-autoregressive discriminative decision model (TypeSafe AI) optimized for G1 screening, G2 routing, G3 filtering, and G4 NLI claim verification.
-* `heuristic`: deterministic regex + lexical overlap fallback.
+* `jev`: the TypeSafe Jev decision model over OpenRouter — the same prompt-based judge pointed at a
+  high-speed, non-autoregressive discriminative model, reported under its own `jev:<model>` label.
 
-Every verdict reports which backend produced it (SSE `backend` fields, `grantloom_decision_fallbacks_total`).
+There is deliberately **no heuristic or fallback decision backend** (decisions-log D31): keyword rules
+cannot judge meaning or catch paraphrased injections. A judge that fails after its bounded retries
+raises a `DECISION_BACKEND_ERROR` (RFC-7807) — the request fails loudly instead of silently degrading.
+Every verdict reports which backend produced it (SSE `backend` fields); retries are metered in
+`grantloom_decision_retries_total`.
 
 ### Retriever tools & Agentic RAG
 
@@ -131,8 +135,10 @@ rows behind the result become citable chunks) and `graph_traverse_query` (entiti
 are linked to parameterized Cypher templates; edges carry the chunk they were extracted from). For complex
 cross-source queries, the **composite agentic RAG** strategy coordinates and merges evidence from all tools
 before synthesis and G4 claim verification. Tool results reach the writer and the G4 verifier.
-The abstention gate (FR-Q8) evaluates a continuous fused relevance signal across dense cosine similarity
-and reciprocal rank fusion, eliminating arbitrary token-count heuristic thresholds.
+The abstention gate (FR-Q8) answers "no information found" unless the dense cosine score reaches
+`retrieval.min_relevance_threshold` **or** the lexical overlap of the query with a BM25 hit reaches
+`retrieval.min_bm25_overlap`. The two signals are on different scales and are calibrated separately;
+the overlap signal is an honest lexical heuristic, not a semantic relevance score.
 
 ## Quickstart
 
@@ -206,8 +212,9 @@ The runner builds an isolated temporary workspace (it never touches `data/`), in
 through the real worker, and asks every question through the same pipeline as the API.
 
 ```powershell
-python -m app.cli.run_eval                                   # offline smoke run (no model)
-python -m app.cli.run_eval --writer openrouter --decision llm_judge --json-out report.json   # OPENROUTER_API_KEY in .env
+python -m app.cli.run_eval                                   # stub writer + real judge (OPENROUTER_API_KEY in .env)
+python -m app.cli.run_eval --writer openrouter --decision llm_judge --json-out report.json   # full real-model run
+python -m app.cli.run_eval --decision jev                    # judge with the TypeSafe Jev decision model
 ```
 
 * **Answer accuracy / recall@k** use whole-value matching (normalized numbers, word boundaries, or an
@@ -217,7 +224,8 @@ python -m app.cli.run_eval --writer openrouter --decision llm_judge --json-out r
 
 ### Results (2026-10-13, this workstation, deterministic embeddings)
 
-Offline run (`python -m app.cli.run_eval`: extractive stub writer, heuristic decision backend). This is a
+Historical offline run (2026-10-13, extractive stub writer + the lexical decision double that now
+lives in `tests/stub_backend.py`; since D31 the CLI requires a real judge). This is a
 pipeline/retrieval check, not a model-quality claim:
 
 | Metric | Result | PRD target | Note |
@@ -229,19 +237,20 @@ pipeline/retrieval check, not a model-quality claim:
 | Faithfulness | not measured | ≥ 95% | circular for an extractive stub |
 | Abstention accuracy (unanswerable) | 100% | ≥ 90% | |
 | Injection block rate, canonical | 100% | ≥ 95% | regex prefilter |
-| Injection block rate, held-out paraphrases | **0%** | ≥ 95% | the heuristic backend cannot see paraphrases; needs `llm_judge` |
+| Injection block rate, held-out paraphrases | **0%** | ≥ 95% | the offline test double cannot see paraphrases; needs `llm_judge` |
 
 **Real-model numbers are not yet measured.** Run
 `python -m app.cli.run_eval --writer openrouter --decision llm_judge --json-out report.json` with
 `OPENROUTER_API_KEY` in `.env` (writer `models.writer_model`, independent judge `models.judge_model`).
-Local Ollama is excluded from all standard test and evaluation plans due to slow local inference; standard testing uses the fast offline pipeline runner (`pytest`, `python -m app.cli.run_eval`) or OpenRouter cloud models.
+Local Ollama is excluded from all standard test and evaluation plans due to slow local inference. `pytest` runs fully offline (it injects a lexical decision double); `run_eval` always needs a real judge model, so it requires `OPENROUTER_API_KEY` (or `--writer ollama`).
 
 **Known limitations:** embeddings are lexical by default; graph extraction is pattern-based (titles,
 roles, credentials, "Project Title:" fields) and misses entities without such cues; spreadsheet formulas
 stored without cached values are re-evaluated at extraction only for the safe arithmetic subset
 (`SUM(range)`, `+ - * /` over cell references) — `IF`/`VLOOKUP`/cross-sheet formulas stay empty;
 small local judge models are noticeably less reliable than hosted ones and occasionally return
-malformed verdicts (the fallback handles these and reports it).
+malformed verdicts (the judge retries a bounded number of times, metered as
+`grantloom_decision_retries_total`, then fails the request loudly — there is no fallback backend).
 
 ## Deployment (Phase 2 — live at https://grantloom.taskmind-ai.com)
 
@@ -277,7 +286,7 @@ app/
   cli/          db, generate_synthetic, run_eval, reindex
   static/       Vanilla JS SPA
 config/         config.json, example questions, eval sets
-templates/      Prompts, refusals, heuristic decision lexicon
+templates/      Prompts, refusals, extraction lexicon (entity/requirement cues — not decisions)
 alembic/        Migrations
 tests/          unit + integration (helpers.py wires real adapters in tmp dirs)
 ```

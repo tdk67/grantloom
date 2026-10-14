@@ -21,8 +21,6 @@ from typing import Any, Callable, Optional
 
 from app.adapters.decision_backends import (
     CorpusEvidenceDomainGuard,
-    HeuristicDecisionBackend,
-    JevDecisionBackend,
     LLMJudgeDecisionBackend,
 )
 from app.adapters.embedder_adapter import DeterministicEmbedder, OpenRouterEmbedder
@@ -113,7 +111,6 @@ class InferenceProfile:
             "writer_model": self.writer_model,
             "judge_model": self.judge_model,
             "decision_backend": decision_backend.name,
-            "decision_fallback": getattr(getattr(decision_backend, "fallback", None), "name", None),
             "embeddings": self.embedding_description,
         }
 
@@ -172,17 +169,18 @@ def build_decision_backend(
     profile: InferenceProfile,
     corpus_overlap: Optional[Callable[[str], float]] = None,
 ) -> DecisionBackendPort:
-    if settings.decision.backend == "heuristic":
-        return HeuristicDecisionBackend(settings.decision.heuristic, corpus_overlap)
-    if settings.decision.backend == "jev":
-        return JevDecisionBackend(
-            llm_client=profile.client,
-            model=settings.decision.jev_model,
-            config=settings.decision,
+    """Build the configured decision backend. Only `llm_judge` and `jev` exist (D31); both are the
+    same prompt-based judge pointed at a different model. A failed judge raises — no heuristic
+    fallback. The corpus-evidence guard is applied per explicit config (identical in dev/Docker)."""
+    cfg = settings.decision
+    if cfg.backend == "jev":
+        judge: DecisionBackendPort = LLMJudgeDecisionBackend(
+            profile.client, cfg.jev_model, cfg, label=f"jev:{cfg.jev_model}"
         )
-    judge: DecisionBackendPort = LLMJudgeDecisionBackend(profile.client, profile.judge_model, settings.decision)
-    if corpus_overlap is not None and settings.decision.heuristic is not None:
-        judge = CorpusEvidenceDomainGuard(judge, corpus_overlap, settings.decision.heuristic.corpus_in_domain_overlap)
+    else:
+        judge = LLMJudgeDecisionBackend(profile.client, profile.judge_model, cfg)
+    if cfg.corpus_evidence_guard and corpus_overlap is not None:
+        judge = CorpusEvidenceDomainGuard(judge, corpus_overlap, cfg.corpus_in_domain_overlap)
     return judge
 
 

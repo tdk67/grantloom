@@ -155,3 +155,54 @@ def test_graph_extraction_ignores_capitalized_non_names():
     chunks = _chunks("doc_q", ["Principal Investigator Eligibility Information is described in Section 3."])
     nodes, _ = GraphEntityExtractor().extract("doc_q", "q.pdf", chunks, known_funders={})
     assert [n for n in nodes if n.label == "Person"] == []
+
+
+def test_graph_extraction_name_capture_is_case_sensitive():
+    """review-04 C4 regression: role/field keywords match case-insensitively, but the NAME capture
+    still requires proper-noun capitalization. Under a global re.IGNORECASE these lowercase phrases
+    became Person nodes ('solar grid', 'someone wrote') and the fix was patched symptom-by-symptom
+    by extending non_name_words."""
+    chunks = _chunks("doc_c", [
+        "Name: solar grid monitoring equipment",
+        "Author: someone wrote this paragraph about the budget.",
+        "lead: firmware update for the inverter controller",
+        "Principal Investigator: Dr. Ingrid Solberg",
+    ])
+    nodes, _ = GraphEntityExtractor().extract("doc_c", "c.pdf", chunks, known_funders={})
+    names = {n.properties["name"] for n in nodes if n.label == "Person"}
+    assert names == {"Dr. Ingrid Solberg"}
+
+
+def test_graph_extraction_award_field_is_not_a_project_title():
+    """review-04 C4 regression: a bare 'Award:' field introduces budget text, not a project title."""
+    chunks = _chunks("doc_a", ["Award: $500,000 for period of performance 2026-2029."])
+    nodes, _ = GraphEntityExtractor().extract("doc_a", "a.pdf", chunks, known_funders={})
+    assert [n for n in nodes if n.label == "Project"] == []
+
+
+@pytest.mark.parametrize(
+    "kind, name, query, expected",
+    [
+        # review-04 C3 regression: short entity names must not substring-match unrelated queries.
+        ("funder", "Office of Science (SC)", "what is the office equipment budget?", False),
+        ("project", "Solar Grid Center", "where is the awards ceremony held?", False),
+        ("project", "Award", "award amount for the project", False),
+        ("funder", "National Science Foundation (NSF)", "which agency funds this via NSF?", True),
+        ("person", "Dr. Ingrid Solberg", "who is Ingrid Solberg?", True),
+    ],
+)
+def test_graph_query_tool_entity_matching_is_strict(kind, name, query, expected):
+    from app.services.retriever_tools import GraphQueryTool
+
+    assert GraphQueryTool._matches(kind, name, query) is expected
+
+
+def test_graph_query_tool_skip_status_does_not_disclose_indexed_entities(stack):
+    """review-04 C3 regression: the skip status reaches the client, so it must say why without
+    enumerating the indexed entity names back to the caller."""
+    from app.services.retriever_tools import GraphQueryTool
+
+    tool = GraphQueryTool(stack.graph_store, stack.registry, stack.settings)
+    outcome = tool.run("what is the airspeed of an unladen swallow?")
+    assert outcome.status == "skipped: no graph entity matched the query"
+    assert "known:" not in outcome.status

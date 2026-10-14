@@ -1,6 +1,6 @@
 """Curated domain specifications and planted ground-truth facts for synthetic grant data."""
 
-from typing import List, Tuple
+from typing import List
 from app.synthetic.excel_builder import SheetSpec
 from app.synthetic.models import DocumentDefinition, PlantedFact, SectionContent
 

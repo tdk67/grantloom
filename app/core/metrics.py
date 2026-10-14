@@ -20,10 +20,10 @@ ROUTER_DECISIONS = Counter(
     "G2 strategy router decisions.",
     ["strategy", "backend"],
 )
-DECISION_FALLBACKS = Counter(
-    "grantloom_decision_fallbacks_total",
-    "Decision backend calls answered by the fallback backend after the primary failed.",
-    ["operation"],
+DECISION_RETRIES = Counter(
+    "grantloom_decision_retries_total",
+    "Decision judge call retries after a transient upstream failure or an invalid verdict.",
+    ["kind"],
 )
 TOOL_INVOCATIONS = Counter(
     "grantloom_tool_invocations_total",

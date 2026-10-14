@@ -1,8 +1,12 @@
 """Golden evaluation runner.
 
 Usage:
-  python -m app.cli.run_eval                                   # offline pipeline smoke run
-  python -m app.cli.run_eval --writer openrouter --decision llm_judge   # real models (OPENROUTER_API_KEY in .env)
+  python -m app.cli.run_eval                                   # stub writer + real judge (OPENROUTER_API_KEY in .env)
+  python -m app.cli.run_eval --writer openrouter --decision llm_judge   # full real-model run
+
+The decision judge always runs on a real model (llm_judge or jev). The former offline heuristic
+decision mode was removed (decisions-log D31): keyword rules cannot judge meaning, so an evaluation
+run on them measures nothing. Only the writer can be stubbed offline.
 
 What it does:
 - Builds an isolated workspace in a temp directory (never touches data/), generates the synthetic
@@ -29,10 +33,10 @@ import shutil
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Callable, Optional
 
 from app.adapters.chroma_adapter import ChromaVectorStoreAdapter
-from app.adapters.decision_backends import HeuristicDecisionBackend, JevDecisionBackend, LLMJudgeDecisionBackend
+from app.adapters.decision_backends import LLMJudgeDecisionBackend
 from app.adapters.kuzu_adapter import KuzuGraphStoreAdapter
 from app.adapters.ollama_client import OllamaClientAdapter
 from app.adapters.openrouter_client import OpenRouterClientAdapter
@@ -51,7 +55,7 @@ from app.services.guardrails import IngestionScanner, OutputGuard
 from app.services.inference import build_embedder, evaluator_independence_problems
 from app.services.ingest_service import IngestionService
 from app.services.key_vault import EphemeralKeyVault
-from app.services.retrieval_service import ABSTENTION_MESSAGE, HybridRetrievalService, corpus_overlap
+from app.services.retrieval_service import ABSTENTION_MESSAGE, HybridRetrievalService
 from app.synthetic.generator import SyntheticDataGenerator
 from app.verification.sql_guard import SqlGuard
 from app.workers.ingest_worker import IngestWorker
@@ -158,9 +162,18 @@ async def build_eval_run(
     workspace: Path,
     writer: str = "offline",
     writer_model: Optional[str] = None,
-    decision: str = "heuristic",
+    decision: str = "llm_judge",
     judge_model: Optional[str] = None,
+    decision_backend_factory: Optional[Callable[[Any], DecisionBackendPort]] = None,
 ) -> EvalRun:
+    """`decision_backend_factory(registry)` is a test-only injection point for the offline pipeline
+    regression (a test double, never exposed through the CLI); production evaluation requires a real
+    judge model (`--decision llm_judge|jev`)."""
+    if decision_backend_factory is None and decision not in ("llm_judge", "jev"):
+        raise SystemExit(
+            f"Unknown --decision '{decision}'. Use 'llm_judge' or 'jev'; the heuristic decision "
+            "backend was removed from the codebase (decisions-log D31)."
+        )
     workspace.mkdir(parents=True, exist_ok=True)
     base = get_settings()
     settings = _workspace_settings(base, workspace)
@@ -168,7 +181,10 @@ async def build_eval_run(
 
     # Model provider for writer / judge: OpenRouter (the real deployment path, key from .env) or local Ollama.
     provider = "ollama" if writer == "ollama" else "openrouter"
+    if decision == "jev" and provider != "openrouter":
+        raise SystemExit("--decision jev runs on OpenRouter; do not combine it with --writer ollama.")
     api_key: Optional[str] = None
+    needs_llm_client = decision_backend_factory is None or writer in ("openrouter", "ollama")
     if provider == "ollama":
         client: Optional[LLMClientPort] = OllamaClientAdapter(
             base_url=settings.llm.ollama_base_url,
@@ -178,10 +194,13 @@ async def build_eval_run(
         )
         writer_model = writer_model or settings.llm.ollama_writer_model
         judge_model = judge_model or settings.llm.ollama_judge_model
-    elif writer == "openrouter" or decision == "llm_judge":
+    elif needs_llm_client:
         api_key = settings.secrets.openrouter_api_key
         if not api_key:
-            raise SystemExit("OpenRouter evaluation needs OPENROUTER_API_KEY in .env.")
+            raise SystemExit(
+                "Evaluation needs a real decision judge: set OPENROUTER_API_KEY in .env "
+                "(the heuristic decision backend was removed, decisions-log D31)."
+            )
         client = OpenRouterClientAdapter(
             base_url=settings.llm.openrouter_base_url,
             timeout_seconds=settings.timeouts.openrouter_seconds,
@@ -207,16 +226,20 @@ async def build_eval_run(
 
     migrator.upgrade("head", db_url=f"sqlite:///{Path(settings.database.sqlite_path).as_posix()}")
     registry = SqliteRegistryAdapter(settings.database.sqlite_path)
-    if decision == "llm_judge":
+    if decision_backend_factory is not None:
+        decision_backend = decision_backend_factory(registry)
+        decision_label = f"injected:{decision_backend.name}"
+        caveats.append(
+            "Decision backend: injected test double (not a production backend); injection and "
+            "faithfulness numbers reflect the double, not a real judge."
+        )
+    elif decision == "jev":
+        jev = settings.decision.jev_model
+        decision_backend = LLMJudgeDecisionBackend(client, jev, settings.decision, label=f"jev:{jev}")
+        decision_label = f"jev {provider}:{jev}"
+    else:
         decision_backend = LLMJudgeDecisionBackend(client, judge_model, settings.decision)
         decision_label = f"llm_judge {provider}:{judge_model}"
-    elif decision == "jev":
-        decision_backend = JevDecisionBackend(client, settings.decision.jev_model, settings.decision)
-        decision_label = f"jev {provider}:{settings.decision.jev_model}"
-    else:
-        decision_backend = HeuristicDecisionBackend(settings.decision.heuristic, lambda q: corpus_overlap(registry, q))
-        decision_label = "heuristic"
-        caveats.append("Decision backend: heuristic. G1 cannot catch paraphrased injections; G4 uses lexical overlap.")
 
     evaluator: Optional[DecisionBackendPort] = None
     evaluator_label = "not run"
@@ -283,7 +306,7 @@ def _matches(item: dict[str, Any], text: str) -> bool:
 
 async def _faithfulness(run: EvalRun, result: AgentRunResult) -> tuple[int, int]:
     """(grounded, total) claims of one answer as judged by the independent evaluator."""
-    guard = OutputGuard(run.registry, run.evaluator)
+    guard = OutputGuard(run.registry, run.evaluator, run.settings.guardrails.citation_excerpt_chars)
     resolved = [c.chunk_id for c in result.citations]
     claims = guard.extract_claims(result.final_answer, resolved)
     payload = []
@@ -413,10 +436,11 @@ async def run_evaluation(
     heldout_path: Path = DEFAULT_HELDOUT,
     writer: str = "offline",
     writer_model: Optional[str] = None,
-    decision: str = "heuristic",
+    decision: str = "llm_judge",
     judge_model: Optional[str] = None,
     workspace: Optional[Path] = None,
     ids: Optional[set[str]] = None,
+    decision_backend_factory: Optional[Callable[[Any], DecisionBackendPort]] = None,
 ) -> dict[str, Any]:
     golden = json.loads(golden_set_path.read_text(encoding="utf-8"))
     if ids:
@@ -424,7 +448,7 @@ async def run_evaluation(
     heldout = json.loads(heldout_path.read_text(encoding="utf-8"))
     own_workspace = workspace is None
     workspace = workspace or Path(tempfile.mkdtemp(prefix="grantloom_eval_"))
-    run = await build_eval_run(workspace, writer, writer_model, decision, judge_model)
+    run = await build_eval_run(workspace, writer, writer_model, decision, judge_model, decision_backend_factory)
     try:
         return await evaluate(run, golden, heldout)
     finally:
@@ -443,8 +467,8 @@ def main() -> None:
     parser.add_argument("--writer", choices=["offline", "openrouter", "ollama"], default="offline",
                         help="openrouter uses OPENROUTER_API_KEY from .env; ollama is local and slow")
     parser.add_argument("--writer-model", default=None, help="Writer model (default: config models.writer_model / llm.ollama_writer_model)")
-    parser.add_argument("--decision", choices=["heuristic", "llm_judge"], default="heuristic",
-                        help="llm_judge runs on the writer's provider (OpenRouter when the writer is offline)")
+    parser.add_argument("--decision", choices=["llm_judge", "jev"], default="llm_judge",
+                        help="decision judge model; runs on the writer's provider (OpenRouter when the writer is offline)")
     parser.add_argument("--judge-model", default=None, help="Judge model (default: config models.judge_model / llm.ollama_judge_model)")
     parser.add_argument("--json-out", type=Path, default=None, help="Write the full report (incl. per-item results) here")
     parser.add_argument("--ids", default=None, help="Comma-separated golden ids to run (unanswerable/adversarial items always run)")
