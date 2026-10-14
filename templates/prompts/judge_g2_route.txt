@@ -5,6 +5,7 @@ Choose the retrieval strategy that best answers the query. Allowed strategies:
 - keyword: exact identifiers, codes, numbers or names.
 - structured: numeric questions over budget spreadsheets (totals, salaries, costs, counts, prices).
 - graph: relationships between people, projects and funders (who leads, who is affiliated, who funded).
+- composite: complex cross-source questions (combining budget spreadsheet math, personnel affiliations, and narrative requirements).
 
 <untrusted>
 <<QUERY>>

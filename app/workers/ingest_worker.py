@@ -181,9 +181,14 @@ class IngestWorker:
                 for sheet_name, sheet in extraction.structured_sheets.items():
                     self.structured_store.load_sheet(doc.doc_id, sheet_name, sheet["columns"], sheet["rows"])
             if self.graph_store:
-                nodes, edges = self.graph_extractor.extract(doc.doc_id, doc.filename, chunks, self._known_funders())
-                self.graph_store.add_nodes(nodes)
-                self.graph_store.add_edges(edges)
+                try:
+                    nodes, edges = self.graph_extractor.extract(doc.doc_id, doc.filename, chunks, self._known_funders())
+                    self.graph_store.add_nodes(nodes)
+                    self.graph_store.add_edges(edges)
+                    logger.info("Graph indexed for '%s': %d node(s), %d edge(s).", doc.doc_id, len(nodes), len(edges))
+                except Exception as g_exc:
+                    logger.error("Graph store indexing failed for '%s': %s", doc.doc_id, g_exc)
+                    raise StorageError(f"Graph store indexing failed for document '{doc.filename}': {g_exc}")
 
             self.registry.update_document_state(
                 doc.doc_id,

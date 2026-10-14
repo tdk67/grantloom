@@ -4,10 +4,71 @@
 > solicitations against institutional documents and answers with citations that resolve to file,
 > page, line, sheet and row coordinates.
 
-**Status:** Phase 1 (native Windows, embedded stores) implemented; Phase 2 deployed — live demo at
-**https://grantloom.taskmind-ai.com** (Docker on the project VPS, public BYOK mode).
+**Status:** Phase 1 (native Windows, embedded stores) implemented; Phase 2 containerized and verified.
 Test suite and evaluation numbers below are reproducible with the commands shown — see
 [Evaluation](#evaluation) for exactly what each number does and does not measure.
+
+---
+
+## The Grant Intelligence & Compliance Business Process
+
+To understand why GrantLoom is architected the way it is, it is essential to understand the real-world operational and financial lifecycle of competitive research grants from an institutional business perspective:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                   THE GRANT LIFECYCLE                                       │
+│                                                                                             │
+│  [20+ Agency Solicitations]             [Institutional Evidence Vault]                      │
+│  DOE, NSF, NIH, ARPA-E, NASA            Past Proposals, Budgets (.xlsx), Facilities, CVs    │
+│            │                                              │                                 │
+│            ▼                                              ▼                                 │
+│  ┌───────────────────┐                          ┌───────────────────┐                       │
+│  │ 1. Opportunity    │  Filter by eligibility,  │ 2. Capability     │  Match equipment,     │
+│  │    Funneling      │  cost-share & caps       │    Synthesis      │  PI record & space    │
+│  └─────────┬─────────┘                          └─────────┬─────────┘                       │
+│            │                                              │                                 │
+│            └──────────────────────┬───────────────────────┘                                 │
+│                                   ▼                                                         │
+│                      ┌─────────────────────────┐                                            │
+│                      │ 3. Budget & Math Guard  │  SQL aggregation over spreadsheet cells    │
+│                      └────────────┬────────────┘  (salaries, fringe, equipment, cost share) │
+│                                   ▼                                                         │
+│                      ┌─────────────────────────┐                                            │
+│                      │ 4. Compliance Matrix    │  Sentence-level solicitation audit:        │
+│                      │    & Gap Analysis       │  Satisfied · Partial · Gap (XLSX export)   │
+│                      └────────────┬────────────┘                                            │
+│                                   ▼                                                         │
+│                      ┌─────────────────────────┐                                            │
+│                      │ 5. Citation-Grounded    │  Co-writing with strict [chunk_id] markers │
+│                      │    Proposal Drafting    │  resolving to page/sheet/row coordinates   │
+│                      └─────────────────────────┘                                            │
+└─────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 1. The Stakes & The Players
+* **Federal Funding Agencies (DOE, NSF, NIH, ARPA-E, NASA, DoD, USDA, EPA)**: Issue multi-million dollar Notice of Funding Opportunities (NOFOs / Solicitations / RFPs) containing 20 to 80 pages of dense statutory, technical, and budgetary rules.
+* **Research Laboratories & Universities**: Academic labs, medical centers, and clean-tech startups depend on grant awards ($1M to $10M+) to fund research personnel, postdoctoral salaries, graduate stipends, and specialized capital equipment.
+* **The Disqualification Trap**: Grants have strict administrative compliance barriers. Missing a single mandatory clause—such as failing to satisfy a 20% non-federal cost-matching formula, omitting Contracting Officer prior-approval documentation for equipment over $50,000, or exceeding a 25-page narrative ceiling—results in **immediate administrative disqualification without substantive merit review**.
+
+### 2. The 5-Stage Business Workflow
+
+1. **Opportunity Discovery & Pipeline Screening (The 20-Solicitation Funnel)**:
+   * A lab does not write proposals in a vacuum; it monitors an active pipeline of 15–20 open federal solicitations across agencies.
+   * Senior scientists must rapidly screen opportunities: *Are we legally eligible as prime? Can the university commit the mandated non-federal matching funds? Does our PI meet the leadership threshold (e.g. ≥ 5 years post-terminal degree)?*
+2. **Institutional Evidence Cross-Referencing**:
+   * Proposals require synthesizing fragmented institutional records:
+     * **Past Proposals (`Past_Proposal.pdf`)**: Demonstrates past award performance, established track record, and prior uptime metrics (e.g., 99.4% microgrid reliability).
+     * **Facilities & Capabilities Statements (`Facilities_Capability_Statement.pdf`)**: Proves the physical existence of required equipment (e.g., 4,500 sq ft testing space, 100 kW regenerative AC grid emulator, RTDS testbeds).
+     * **Biosketches & Letters of Commitment (`Cost_Share_Commitment_Letter.pdf`)**: Verifies non-federal cash commitments and PI credentials.
+3. **Tabular Budget Verification & Mathematical Grounding**:
+   * Grant budgets are governed by strict formulas stored in multi-sheet Excel workbooks (`Lab_Budget.xlsx`).
+   * Generic text LLMs fail catastrophically at tabular math. GrantLoom's `SqlGuard` runs deterministic SQL queries directly over spreadsheet cell schemas to verify personnel salaries, effort months, travel sub-allocations, and equipment direct costs.
+4. **Automated Compliance Matrix & Readiness Auditing**:
+   * Before committing weeks of writing, the team audits the solicitation's mandatory requirement sentences (`must`, `shall`, `required`, `may not exceed`).
+   * GrantLoom grades institutional readiness per requirement: **Satisfied** (grounded in active evidence), **Partial** (preliminary evidence exists but missing documentation), or **Gap** (missing compliance asset), exporting a styled audit report to Excel.
+5. **Verifiable Co-Writing (Citations by Construction)**:
+   * During proposal drafting, every assertion must trace back to immutable source coordinates (filename, page number, sheet name, row numbers).
+   * GrantLoom's language model is restricted to emitting `[chunk_id]` tokens that the backend resolves and validates against the source document chunks, eliminating ghost citations and hallucinations.
 
 ---
 
@@ -50,23 +111,28 @@ Browser SPA (vanilla JS)  ──HTTP/SSE──▶  FastAPI  (X-API-Key, rate lim
 | Gate | What runs |
 |---|---|
 | **G1 input** | Regex prefilter (non-English scripts, canonical injection phrases), then the decision backend's semantic screen (paraphrased injections, domain relevance). |
-| **G2 router** | Decision backend picks `hybrid` / `keyword` / `structured` / `graph` (`semantic` only with a semantic embedder); below `decision.router_min_confidence` it falls back to `hybrid`. |
+| **G2 router** | Decision backend picks `hybrid` / `keyword` / `structured` / `graph` / `composite` (`semantic` only with a semantic embedder); below `decision.router_min_confidence` it falls back to `hybrid`. When `composite` is selected for complex queries, the agent executes multi-source retrieval across tabular SQL, relationship graph, and narrative vectors. |
 | **G3 context** | Drops chunks tainted at ingestion, injection-like chunks and irrelevant chunks; reranks by verdict. |
 | **G4 output** | Resolves citations, then verifies every claim against the evidence it cites. |
-| **Ingestion** | Tier 1 regex on every chunk; Tier 2 semantic check on flagged chunks plus a random sample; quarantine when tainted *chunks* exceed `guardrails.taint_threshold_chunks`. |
+| **Ingestion** | Tier 1 regex on every chunk; Tier 2 semantic check on flagged chunks plus a random sample; quarantine when tainted *chunks* exceed `guardrails.taint_threshold_chunks`. Graph extraction indexes entities into KùzuDB with full error diagnostics. |
 
-The **decision backend** (`decision.backend`) is `llm_judge` — a prompt-based judge on the configured
-judge model — with a `heuristic` (regex + lexical overlap) fallback. Every verdict reports which backend
-produced it (SSE `backend` fields, `grantloom_decision_fallbacks_total`). **Jev and Julia-1 from the data
-strategy are deferred and not implemented** (decisions-log D22).
+The **decision backend** (`decision.backend`) supports:
+* `llm_judge`: a prompt-based judge on the configured judge model (OpenRouter or Ollama).
+* `jev`: high-speed, non-autoregressive discriminative decision model (TypeSafe AI) optimized for G1 screening, G2 routing, G3 filtering, and G4 NLI claim verification.
+* `heuristic`: deterministic regex + lexical overlap fallback.
 
-### Retriever tools
+Every verdict reports which backend produced it (SSE `backend` fields, `grantloom_decision_fallbacks_total`).
+
+### Retriever tools & Agentic RAG
 
 `dense_vector_search` and `bm25_keyword_search` (fused with RRF), `sql_tabular_query` (the writer model
 generates a SELECT over the spreadsheet schemas, executed through the AST guard + SQLite authorizer; the
 rows behind the result become citable chunks) and `graph_traverse_query` (entities named in the question
-are linked to parameterized Cypher templates; edges carry the chunk they were extracted from). Tool
-results reach the writer and the G4 verifier.
+are linked to parameterized Cypher templates; edges carry the chunk they were extracted from). For complex
+cross-source queries, the **composite agentic RAG** strategy coordinates and merges evidence from all tools
+before synthesis and G4 claim verification. Tool results reach the writer and the G4 verifier.
+The abstention gate (FR-Q8) evaluates a continuous fused relevance signal across dense cosine similarity
+and reciprocal rank fusion, eliminating arbitrary token-count heuristic thresholds.
 
 ## Quickstart
 

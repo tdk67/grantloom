@@ -109,23 +109,15 @@ class HybridRetrievalService:
         for b_res in bm25_results[:5]:
             best_overlap = max(best_overlap, len(query_tokens & set(TOKEN_RE.findall(b_res.text.lower()))))
 
-        if not bm25_results:
-            has_substantive_bm25 = False
-        elif not query_tokens:
-            has_substantive_bm25 = True
-        elif len(query_tokens) == 1:
-            has_substantive_bm25 = best_overlap >= 1
-        elif len(query_tokens) <= 3:
-            has_substantive_bm25 = best_overlap >= 2
-        else:
-            has_substantive_bm25 = best_overlap >= 3 or (best_overlap >= 2 and best_overlap / len(query_tokens) >= 0.5)
+        bm25_overlap_ratio = (best_overlap / len(query_tokens)) if query_tokens else (1.0 if bm25_results else 0.0)
+        max_relevance_signal = max(max_dense_score, bm25_overlap_ratio)
 
-        if max_dense_score < cfg.min_relevance_threshold and not has_substantive_bm25:
+        if max_relevance_signal < cfg.min_relevance_threshold:
             logger.info(
-                "Abstention: max dense score %.3f below threshold %.3f without substantive BM25 hits.",
-                max_dense_score, cfg.min_relevance_threshold,
+                "Abstention: fused relevance signal %.3f below threshold %.3f (dense=%.3f, bm25_overlap=%.3f).",
+                max_relevance_signal, cfg.min_relevance_threshold, max_dense_score, bm25_overlap_ratio,
             )
-            return result([], max_dense_score, True)
+            return result([], max_relevance_signal, True)
 
         # 4. Reciprocal Rank Fusion (RRF)
         rrf_scores: dict[str, float] = {}
@@ -157,7 +149,7 @@ class HybridRetrievalService:
             logger.info("Abstention: no active chunks retained after fusion.")
             return result([], 0.0, True)
 
-        keyword_score = round(best_overlap / len(query_tokens), 2) if (has_substantive_bm25 and query_tokens) else 0.0
+        keyword_score = round(bm25_overlap_ratio, 2) if (bm25_overlap_ratio >= cfg.min_relevance_threshold and query_tokens) else 0.0
         return result(retained, max(max_dense_score, min(1.0, keyword_score)), False)
 
 

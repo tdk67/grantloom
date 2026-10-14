@@ -57,13 +57,21 @@ def test_unknown_key_rejection(tmp_path: Path):
         load_settings(config_path=_write(tmp_path, data))
 
 
-@pytest.mark.parametrize("backend", ["jev", "julia1"])
+@pytest.mark.parametrize("backend", ["julia1"])
 def test_deferred_decision_backends_are_rejected_with_pointer(tmp_path: Path, backend: str):
     data = _config()
     data["decision"]["backend"] = backend
     with pytest.raises(ValidationError) as exc_info:
         load_settings(config_path=_write(tmp_path, data))
     assert "D22" in str(exc_info.value)
+
+
+def test_jev_decision_backend_valid_loading(tmp_path: Path):
+    data = _config()
+    data["decision"]["backend"] = "jev"
+    settings = load_settings(config_path=_write(tmp_path, data))
+    assert settings.decision.backend == "jev"
+
 
 
 def test_missing_file_raises_not_found(tmp_path: Path):

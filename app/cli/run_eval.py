@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 
 from app.adapters.chroma_adapter import ChromaVectorStoreAdapter
-from app.adapters.decision_backends import FallbackDecisionBackend, HeuristicDecisionBackend, LLMJudgeDecisionBackend
+from app.adapters.decision_backends import HeuristicDecisionBackend, JevDecisionBackend, LLMJudgeDecisionBackend
 from app.adapters.kuzu_adapter import KuzuGraphStoreAdapter
 from app.adapters.ollama_client import OllamaClientAdapter
 from app.adapters.openrouter_client import OpenRouterClientAdapter
@@ -207,14 +207,14 @@ async def build_eval_run(
 
     migrator.upgrade("head", db_url=f"sqlite:///{Path(settings.database.sqlite_path).as_posix()}")
     registry = SqliteRegistryAdapter(settings.database.sqlite_path)
-    heuristic = HeuristicDecisionBackend(settings.decision.heuristic, lambda q: corpus_overlap(registry, q))
     if decision == "llm_judge":
-        decision_backend: DecisionBackendPort = FallbackDecisionBackend(
-            LLMJudgeDecisionBackend(client, judge_model, settings.decision), heuristic
-        )
-        decision_label = f"llm_judge {provider}:{judge_model} (fallback: heuristic)"
+        decision_backend = LLMJudgeDecisionBackend(client, judge_model, settings.decision)
+        decision_label = f"llm_judge {provider}:{judge_model}"
+    elif decision == "jev":
+        decision_backend = JevDecisionBackend(client, settings.decision.jev_model, settings.decision)
+        decision_label = f"jev {provider}:{settings.decision.jev_model}"
     else:
-        decision_backend = heuristic
+        decision_backend = HeuristicDecisionBackend(settings.decision.heuristic, lambda q: corpus_overlap(registry, q))
         decision_label = "heuristic"
         caveats.append("Decision backend: heuristic. G1 cannot catch paraphrased injections; G4 uses lexical overlap.")
 
@@ -246,7 +246,10 @@ async def build_eval_run(
         key_vault=key_vault,
     )
     ingest = IngestionService(registry=registry, settings=settings)
-    generated = SyntheticDataGenerator(output_dir=Path(settings.database.synthetic_path)).generate_all(quiet=True)
+    # The golden evaluation set is calibrated against the canonical baseline corpus
+    generated = SyntheticDataGenerator(output_dir=Path(settings.database.synthetic_path)).generate_all(
+        quiet=True, solicitation_count=1
+    )
     # Solicitation first so its funders are known when the proposal is indexed
     for info in sorted(generated["files"], key=lambda f: not f["filename"].startswith("DOE")):
         uploaded = ingest.upload_document(info["filename"], Path(info["path"]).read_bytes())

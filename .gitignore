@@ -59,3 +59,10 @@ htmlcov/
 *~
 .DS_Store
 Thumbs.db
+
+# End-to-end artifacts and submission documents
+e2e/
+
+# Archive bundles
+*.zip
+

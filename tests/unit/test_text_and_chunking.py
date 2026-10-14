@@ -50,3 +50,13 @@ def test_contains_value_is_whole_value_not_substring():
     assert not contains_value("Row 12 lists 2 travelers", "1")
     assert not contains_value("budgeted 120000", "12000")
     assert contains_value("Dr. Elena Vance is the PI", "elena vance")
+
+
+def test_split_sentences_preserves_honorifics():
+    from app.core.text import split_sentences
+    text = "The Principal Investigator is **Dr. Elena Vance** [doc_1:1:0]. She works with Prof. Holloway on project DE-01."
+    sentences = split_sentences(text)
+    assert len(sentences) == 2
+    assert sentences[0] == "The Principal Investigator is **Dr. Elena Vance** [doc_1:1:0]."
+    assert sentences[1] == "She works with Prof. Holloway on project DE-01."
+

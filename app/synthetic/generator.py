@@ -10,12 +10,12 @@ from app.synthetic.excel_builder import SyntheticExcelBuilder
 from app.synthetic.fixtures import (
     build_compliance_matrix_spec,
     build_cost_share_letter_spec,
-    build_doe_solar_nofo_spec,
     build_facilities_capability_spec,
     build_lab_budget_specs,
     build_past_proposal_spec,
     get_planted_facts,
 )
+from app.synthetic.solicitation_portfolio import build_diverse_solicitation_specs
 from app.synthetic.models import GroundTruthManifest
 from app.synthetic.pdf_builder import SyntheticPDFBuilder
 
@@ -28,27 +28,28 @@ class SyntheticDataGenerator:
         self.pdf_builder = SyntheticPDFBuilder()
         self.excel_builder = SyntheticExcelBuilder()
 
-    def generate_all(self, quiet: bool = False) -> Dict[str, any]:
-        """Generates all synthetic documents and writes the ground-truth manifest."""
+    def generate_all(self, quiet: bool = False, solicitation_count: int = 20) -> Dict[str, any]:
+        """Generates all synthetic documents (diverse solicitations + lab evidence) and writes the manifest."""
         self.output_dir.mkdir(parents=True, exist_ok=True)
         results: Dict[str, any] = {"files": [], "manifest_path": None, "fact_count": 0}
 
-        # 1. Generate DOE Solar NOFO Solicitation PDF (~25 pages)
-        nofo_spec = build_doe_solar_nofo_spec()
-        nofo_path = self.output_dir / nofo_spec.filename
-        self.pdf_builder.build_pdf(nofo_spec, nofo_path)
-        nofo_pages = self._count_pdf_pages(nofo_path)
-        results["files"].append(
-            {
-                "filename": nofo_spec.filename,
-                "type": "solicitation_pdf",
-                "path": str(nofo_path),
-                "pages": nofo_pages,
-                "size_bytes": nofo_path.stat().st_size,
-            }
-        )
-        if not quiet:
-            print(f"[SyntheticData] Generated {nofo_spec.filename}: {nofo_pages} pages ({nofo_path.stat().st_size:,} bytes)")
+        # 1. Generate diverse funding solicitations across federal agencies (DOE, NSF, NIH, ARPA-E, NASA, DoD, USDA, EPA)
+        solicitation_specs = build_diverse_solicitation_specs(count=solicitation_count)
+        for nofo_spec in solicitation_specs:
+            nofo_path = self.output_dir / nofo_spec.filename
+            self.pdf_builder.build_pdf(nofo_spec, nofo_path)
+            nofo_pages = self._count_pdf_pages(nofo_path)
+            results["files"].append(
+                {
+                    "filename": nofo_spec.filename,
+                    "type": "solicitation_pdf",
+                    "path": str(nofo_path),
+                    "pages": nofo_pages,
+                    "size_bytes": nofo_path.stat().st_size,
+                }
+            )
+            if not quiet:
+                print(f"[SyntheticData] Generated {nofo_spec.filename}: {nofo_pages} pages ({nofo_path.stat().st_size:,} bytes)")
 
         # 2. Generate Past Proposal PDF (~15 pages)
         prop_spec = build_past_proposal_spec()

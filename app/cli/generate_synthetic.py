@@ -25,6 +25,13 @@ def parse_args(args=None):
         action="store_true",
         help="Suppress console output during generation",
     )
+    parser.add_argument(
+        "--solicitations",
+        "-s",
+        type=int,
+        default=20,
+        help="Number of diverse funding solicitations to generate across agencies (default: 20)",
+    )
     return parser.parse_args(args)
 
 
@@ -34,9 +41,10 @@ def main():
         args.output_dir = Path(get_settings().database.synthetic_path)
     print(f"=== GrantLoom Synthetic Data Generator ===")
     print(f"Destination: {args.output_dir.resolve()}")
+    print(f"Solicitation pipeline count: {args.solicitations}")
 
     generator = SyntheticDataGenerator(output_dir=args.output_dir)
-    results = generator.generate_all(quiet=args.quiet)
+    results = generator.generate_all(quiet=args.quiet, solicitation_count=args.solicitations)
 
     print("\nSummary of Generated Artifacts:")
     for file_info in results["files"]:

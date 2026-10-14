@@ -24,17 +24,17 @@ from app.core.text import lexicon_hits, split_sentences
 from app.ports.models import DocumentChunk, GraphEdge, GraphNode
 
 NAME = r"[A-Z][a-z]+(?:[ ][A-Z]\.)?[ ][A-Z][a-zA-Z'\-]+"
-TITLE = r"(?:Dr\.|Prof\.|Professor)"
+TITLE = r"(?:Dr\.|Prof\.|Professor|Mr\.|Ms\.|Mrs\.|Dean|Director)"
 ROLE = (
     r"(?:Co-Principal Investigator|Principal Investigator|Lead Investigator|Co-Investigator|Co-PI|"
-    r"Project Director|Program Director)"
+    r"Project Director|Program Director|Lead Author|Author|Investigator|Key Personnel|Faculty Lead)"
 )
 TITLED_PERSON_RE = re.compile(rf"\b{TITLE}[ ]({NAME})")
-ROLE_PERSON_RE = re.compile(rf"\b{ROLE}(?:[ ]\(PI\))?[ ]*[:\-–—]?[ ]*(?:is[ ]+)?(?:{TITLE}[ ]+)?({NAME})")
-FIELD_PERSON_RE = re.compile(rf"\bName:[ ]*(?:{TITLE}[ ]+)?({NAME})")
+ROLE_PERSON_RE = re.compile(rf"\b{ROLE}(?:[ ]\(PI\))?[ ]*[:\-–—]?[ ]*(?:is[ ]+)?(?:{TITLE}[ ]+)?({NAME})", re.IGNORECASE)
+FIELD_PERSON_RE = re.compile(rf"\b(?:Name|Author|Lead):[ ]*(?:{TITLE}[ ]+)?({NAME})", re.IGNORECASE)
 CREDENTIAL_PERSON_RE = re.compile(rf"\b({NAME}),[ ]+(?:Ph\.D\.|M\.D\.|M\.S\.|M\.Sc\.|M\.A\.|MBA|B\.S\.)")
 ORG_ACRONYM_RE = re.compile(r"((?:[A-Z][a-zA-Z.]*[ ](?:of[ ](?:the[ ])?|for[ ]|and[ ])?){1,7}[A-Z][a-zA-Z.]*)[ ]\(([A-Z]{2,8})\)")
-PROJECT_TITLE_RE = re.compile(r"(?:Project Title|Title of Project|Project Name)[ ]*:[ ]*([^\n]{8,160})")
+PROJECT_TITLE_RE = re.compile(r"(?:Project Title|Title of Project|Project Name|Proposal Title|Award)[ ]*:[ ]*([^\n]{8,160})", re.IGNORECASE)
 REQUIREMENT_MAX_CHARS = 400
 
 

@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.api.deps import get_ask_service, get_inference_profile, verify_master_api_key
+from app.core.errors import GrantLoomError
 from app.core.rate_limit import ask_limit, limiter
 from app.services.ask_service import AskService
 from app.services.inference import InferenceProfile
@@ -38,8 +39,14 @@ async def ask_endpoint(
     api_key = await profile.authorize(x_openrouter_key)
 
     async def sse_event_stream() -> AsyncIterator[str]:
-        async for event_type, data in ask_service.stream_ask(query=req.query, api_key=api_key):
-            yield f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+        try:
+            async for event_type, data in ask_service.stream_ask(query=req.query, api_key=api_key):
+                yield f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+        except GrantLoomError as exc:
+            yield f"event: error\ndata: {json.dumps(exc.to_problem_details())}\n\n"
+        except Exception as exc:
+            logger.exception("Ask streaming failed: %s", exc)
+            yield f"event: error\ndata: {json.dumps({'title': 'Inference Error', 'detail': str(exc), 'status': 500})}\n\n"
 
     return StreamingResponse(
         sse_event_stream(),

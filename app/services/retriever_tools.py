@@ -214,15 +214,17 @@ class GraphQueryTool:
     @staticmethod
     def _matches(kind: str, name: str, query: str) -> bool:
         q_tokens = set(content_tokens(query))
+        query_lower = query.lower()
         if kind == "person":
             parts = [p for p in name.replace("Dr.", "").replace("Prof.", "").split() if len(p) >= 3]
-            return bool(parts) and (parts[-1].lower() in q_tokens or " ".join(parts).lower() in query.lower())
+            return bool(parts) and (parts[-1].lower() in q_tokens or " ".join(parts).lower() in query_lower)
         if kind == "funder":
             acronym = name.rsplit("(", 1)[-1].rstrip(")") if "(" in name else ""
-            return bool(acronym) and acronym in query.split()
+            full_name = name.split(" (")[0] if " (" in name else name
+            return (bool(acronym) and acronym.lower() in query_lower.split()) or (len(full_name) > 3 and full_name.lower() in query_lower)
         title_tokens = set(content_tokens(name))
         overlap = len(title_tokens & q_tokens)
-        return overlap >= 3 or (title_tokens and overlap / len(title_tokens) >= 0.6)
+        return overlap >= 2 or (bool(title_tokens) and overlap / len(title_tokens) >= 0.4) or (len(name) > 5 and name.lower() in query_lower)
 
     def run(self, query: str) -> ToolOutcome:
         started = time.perf_counter()
@@ -230,7 +232,8 @@ class GraphQueryTool:
         try:
             matched = [e for e in self._entities() if self._matches(e[0], e[2], query)]
             if not matched:
-                outcome.status = "skipped: no graph entity named in the question"
+                available_summary = ", ".join(f"{e[2]}" for e in self._entities()[:5])
+                outcome.status = f"skipped: no graph entity matched (known: {available_summary or 'none'})"
                 return outcome.finish(started)
             chunk_ids: list[str] = []
             for kind, entity_id, name, mention_chunk in matched:

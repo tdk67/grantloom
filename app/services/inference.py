@@ -21,8 +21,8 @@ from typing import Any, Callable, Optional
 
 from app.adapters.decision_backends import (
     CorpusEvidenceDomainGuard,
-    FallbackDecisionBackend,
     HeuristicDecisionBackend,
+    JevDecisionBackend,
     LLMJudgeDecisionBackend,
 )
 from app.adapters.embedder_adapter import DeterministicEmbedder, OpenRouterEmbedder
@@ -172,13 +172,18 @@ def build_decision_backend(
     profile: InferenceProfile,
     corpus_overlap: Optional[Callable[[str], float]] = None,
 ) -> DecisionBackendPort:
-    heuristic = HeuristicDecisionBackend(settings.decision.heuristic, corpus_overlap)
     if settings.decision.backend == "heuristic":
-        return heuristic
+        return HeuristicDecisionBackend(settings.decision.heuristic, corpus_overlap)
+    if settings.decision.backend == "jev":
+        return JevDecisionBackend(
+            llm_client=profile.client,
+            model=settings.decision.jev_model,
+            config=settings.decision,
+        )
     judge: DecisionBackendPort = LLMJudgeDecisionBackend(profile.client, profile.judge_model, settings.decision)
-    if corpus_overlap is not None:
+    if corpus_overlap is not None and settings.decision.heuristic is not None:
         judge = CorpusEvidenceDomainGuard(judge, corpus_overlap, settings.decision.heuristic.corpus_in_domain_overlap)
-    return FallbackDecisionBackend(primary=judge, fallback=heuristic)
+    return judge
 
 
 def evaluator_independence_problems(writer_model: str, judge_model: str) -> list[str]:

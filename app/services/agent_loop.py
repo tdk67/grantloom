@@ -130,17 +130,19 @@ class PlannerAgent:
             available.append("structured")
         if self.graph_tool is not None:
             available.append("graph")
+        if (self.structured_tool is not None and self.structured_tool.available()) or self.graph_tool is not None:
+            available.append("composite")
         return [s for s in STRATEGIES if s in available]
 
     def tools_for(self, strategy: str) -> list[str]:
         tools = []
-        if strategy in ("hybrid", "semantic", "structured", "graph"):
+        if strategy in ("hybrid", "semantic", "structured", "graph", "composite"):
             tools.append("dense_vector_search")
-        if strategy in ("hybrid", "keyword", "structured", "graph"):
+        if strategy in ("hybrid", "keyword", "structured", "graph", "composite"):
             tools.append("bm25_keyword_search")
-        if strategy == "structured":
+        if strategy in ("structured", "composite") and self.structured_tool is not None and self.structured_tool.available():
             tools.append("sql_tabular_query")
-        if strategy == "graph":
+        if strategy in ("graph", "composite") and self.graph_tool is not None:
             tools.append("graph_traverse_query")
         return tools
 

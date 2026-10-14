@@ -10,6 +10,10 @@ from app.core.constants import ENGLISH_STOP_WORDS
 TOKEN_RE = re.compile(r"\b[a-zA-Z0-9_\-]{2,}\b")
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 NUMBER_RE = re.compile(r"\$?\d[\d,]*(?:\.\d+)?%?")
+COMMON_ABBREVIATIONS = {
+    "dr.", "prof.", "mr.", "mrs.", "ms.", "vs.", "approx.", "dept.",
+    "fig.", "no.", "al.", "inc.", "corp.", "ltd.", "co.", "gov.", "e.g.", "i.e."
+}
 
 
 def content_tokens(text: str) -> list[str]:
@@ -27,7 +31,17 @@ def overlap_ratio(query: str, text: str) -> float:
 
 
 def split_sentences(text: str) -> list[str]:
-    return [s.strip() for s in SENTENCE_SPLIT_RE.split(text) if s and s.strip()]
+    """Split text into sentences, preserving honorifics (e.g. Dr., Prof.) and abbreviations."""
+    raw_splits = [s.strip() for s in SENTENCE_SPLIT_RE.split(text) if s and s.strip()]
+    merged: list[str] = []
+    for s in raw_splits:
+        if merged:
+            last_token = merged[-1].split()[-1].lower().strip("*_`~()[]\"'")
+            if last_token in COMMON_ABBREVIATIONS:
+                merged[-1] = f"{merged[-1]} {s}"
+                continue
+        merged.append(s)
+    return merged
 
 
 def normalize_number(raw: str) -> str:

@@ -487,8 +487,9 @@ function appendUserMessage(text) {
   msg.innerHTML = `
     <div class="message-header"><span>Researcher Query</span></div>
     <div class="message-body">${escapeHtml(text)}</div>`;
-  elements.chatTranscript.appendChild(msg);
-  msg.scrollIntoView({ behavior: "smooth" });
+  // Prepend to top so newest question and answer stay at the top
+  elements.chatTranscript.insertBefore(msg, elements.chatTranscript.firstChild);
+  msg.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function appendBotMessageSkeleton(messageId) {
@@ -502,8 +503,15 @@ function appendBotMessageSkeleton(messageId) {
     </div>
     <div class="message-body">Thinking...</div>
     <div class="message-warning hidden" role="alert"></div>`;
-  elements.chatTranscript.appendChild(msg);
-  msg.scrollIntoView({ behavior: "smooth" });
+  // Insert right below the newest user message at the top
+  const firstUser = elements.chatTranscript.querySelector(".message-user");
+  if (firstUser && firstUser.nextSibling) {
+    elements.chatTranscript.insertBefore(msg, firstUser.nextSibling);
+  } else if (firstUser) {
+    elements.chatTranscript.appendChild(msg);
+  } else {
+    elements.chatTranscript.insertBefore(msg, elements.chatTranscript.firstChild);
+  }
 }
 
 function updateBotMessage(messageId, text) {
@@ -842,6 +850,52 @@ function escapeHtml(str) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
+}
+
+// ==============================================================================
+// 10. Curated Starter Prompts Loader
+// ==============================================================================
+
+async function loadStarterPrompts() {
+  if (!elements.starterPromptsList) return;
+  try {
+    const res = await apiFetch("/api/v1/examples");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const examples = await res.json();
+    if (!Array.isArray(examples) || examples.length === 0) {
+      elements.starterPromptsList.innerHTML = `<div class="prompt-placeholder">No starter prompts available.</div>`;
+      return;
+    }
+    elements.starterPromptsList.innerHTML = "";
+    examples.forEach((ex) => {
+      const card = document.createElement("div");
+      card.className = "starter-prompt-card";
+      card.setAttribute("role", "button");
+      card.setAttribute("tabindex", "0");
+      card.title = ex.description || ex.question;
+      card.innerHTML = `
+        <span class="starter-prompt-category">${escapeHtml(ex.category || "Example")}</span>
+        <div class="starter-prompt-text">${escapeHtml(ex.question)}</div>
+      `;
+      const selectPrompt = () => {
+        switchTab("qa");
+        elements.chatInput.value = ex.question;
+        elements.chatInput.focus();
+        elements.chatInput.scrollIntoView({ behavior: "smooth" });
+      };
+      card.addEventListener("click", selectPrompt);
+      card.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          selectPrompt();
+        }
+      });
+      elements.starterPromptsList.appendChild(card);
+    });
+  } catch (err) {
+    console.warn("Failed to load starter prompts:", err);
+    elements.starterPromptsList.innerHTML = `<div class="prompt-placeholder">Failed to load starter prompts.</div>`;
+  }
 }
 
 // ==============================================================================

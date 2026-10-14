@@ -60,20 +60,16 @@
   },
   "decision": {
     "backend": "llm_judge",
-    "fallback_backend": "heuristic",
+    "jev_model": "typesafe/jev-router",
     "router_min_confidence": 0.6,
     "domain_min_confidence": 0.6,
     "injection_probability_threshold": 0.5,
     "min_chunk_usefulness": 20,
+    "max_retries": 3,
+    "retry_delay_seconds": 1.0,
     "llm_judge": {
       "max_chunk_chars": 1200,
       "max_tier2_chunks_per_call": 8
-    },
-    "heuristic": {
-      "grounded_overlap": 0.7,
-      "satisfied_overlap": 0.5,
-      "partial_overlap": 0.25,
-      "corpus_in_domain_overlap": 0.5
     }
   },
   "sql_guard": {

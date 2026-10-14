@@ -26,6 +26,10 @@
     "graph": [
       "who", "affiliat*", "co-investigator*", "co-pi", "collaborat*", "leads", "leading", "led by", "funded",
       "funder*", "which agency", "relationship*", "team", "works with", "partner*"
+    ],
+    "composite": [
+      "compare", "reconcile", "cross-reference", "meets requirement", "matching funds", "cost share requirement",
+      "verify budget against", "aligns with"
     ]
   },
   "non_name_words": [

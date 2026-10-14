@@ -107,24 +107,27 @@ class LLMJudgeConfig(_Strict):
 
 
 class HeuristicConfig(_Strict):
-    grounded_overlap: float
-    satisfied_overlap: float
-    partial_overlap: float
-    corpus_in_domain_overlap: float
+    grounded_overlap: float = 0.5
+    satisfied_overlap: float = 0.5
+    partial_overlap: float = 0.25
+    corpus_in_domain_overlap: float = 0.5
 
 
-DEFERRED_DECISION_BACKENDS = {"jev", "julia1"}
+DEFERRED_DECISION_BACKENDS = {"julia1"}
 
 
 class DecisionConfig(_Strict):
     backend: str
-    fallback_backend: Literal["heuristic"]
+    jev_model: str = "typesafe/jev-router"
     router_min_confidence: float
     domain_min_confidence: float
     injection_probability_threshold: float
     min_chunk_usefulness: float
+    max_retries: int = 3
+    retry_delay_seconds: float = 1.0
     llm_judge: LLMJudgeConfig
-    heuristic: HeuristicConfig
+    fallback_backend: Optional[str] = None
+    heuristic: Optional[HeuristicConfig] = None
 
     @field_validator("backend")
     @classmethod
@@ -132,10 +135,10 @@ class DecisionConfig(_Strict):
         if value in DEFERRED_DECISION_BACKENDS:
             raise ValueError(
                 f"Decision backend '{value}' is deferred and not implemented (see decisions-log.md D22). "
-                "Use 'llm_judge' or 'heuristic'."
+                "Use 'llm_judge' or 'jev'."
             )
-        if value not in ("llm_judge", "heuristic"):
-            raise ValueError(f"Unknown decision backend '{value}'. Use 'llm_judge' or 'heuristic'.")
+        if value not in ("llm_judge", "jev", "heuristic"):
+            raise ValueError(f"Unknown decision backend '{value}'. Use 'llm_judge' or 'jev'.")
         return value
 
 

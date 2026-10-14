@@ -38,7 +38,7 @@ NON_ENGLISH_SCRIPTS_RE = re.compile(
 # Citation marker pattern: [chunk_id]
 CITATION_PATTERN = re.compile(r"\[([a-zA-Z0-9_\-:]+)\]")
 
-STRATEGIES = ("hybrid", "semantic", "keyword", "structured", "graph")
+STRATEGIES = ("hybrid", "semantic", "keyword", "structured", "graph", "composite")
 
 
 def _record(verdict: GateVerdict) -> GateVerdict:
@@ -270,7 +270,7 @@ class OutputGuard:
                         line=f"{chunk.line_start}-{chunk.line_end}" if chunk.line_start is not None else None,
                         sheet=chunk.sheet_name,
                         row=f"{chunk.row_start}-{chunk.row_end}" if chunk.row_start is not None else None,
-                        excerpt=chunk.text_content[:250].strip(),
+                        excerpt=chunk.text_content[:2500].strip(),
                         verified=True,
                     )
                 )

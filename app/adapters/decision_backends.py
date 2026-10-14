@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, Awaitable, Callable, Literal, Optional, Sequence, TypeVar
@@ -144,15 +145,39 @@ class LLMJudgeDecisionBackend(DecisionBackendPort):
 
     async def _ask(self, template: str, schema: type[BaseModel], api_key: Optional[str], **values: str) -> Any:
         prompt = render_template(f"prompts/{template}", **values)
-        raw = await self.llm_client.generate_response(
-            prompt=prompt,
-            model=self.judge_model,
-            system_prompt=load_template("prompts/judge_system.txt"),
-            temperature=0.0,
-            api_key=api_key,
-            json_output=True,
-        )
-        return _parse_json(raw, schema)
+        max_attempts = getattr(self.config, "max_retries", 3)
+        retry_delay = getattr(self.config, "retry_delay_seconds", 1.0)
+        last_exc: Optional[Exception] = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                raw = await self.llm_client.generate_response(
+                    prompt=prompt,
+                    model=self.judge_model,
+                    system_prompt=load_template("prompts/judge_system.txt"),
+                    temperature=0.0,
+                    api_key=api_key,
+                    json_output=True,
+                )
+                return _parse_json(raw, schema)
+            except (LLMInferenceError, UpstreamServiceError, DecisionBackendError) as exc:
+                last_exc = exc
+                if attempt < max_attempts:
+                    delay = retry_delay * (2 ** (attempt - 1))
+                    logger.warning(
+                        "LLM judge '%s' call '%s' failed (attempt %d/%d): %s; retrying in %.1fs...",
+                        self.judge_model, template, attempt, max_attempts, exc, delay,
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(
+                        "LLM judge '%s' call '%s' failed after %d attempts: %s",
+                        self.judge_model, template, max_attempts, exc,
+                    )
+                    raise DecisionBackendError(
+                        f"Decision judge '{self.judge_model}' failed after {max_attempts} attempts: {exc}"
+                    ) from exc
+        raise DecisionBackendError(f"Decision judge '{self.judge_model}' failed after {max_attempts} attempts: {last_exc}")
 
     def _chunk_blocks(self, chunks: Sequence[DocumentChunk]) -> str:
         return "\n".join(
@@ -310,11 +335,11 @@ class CorpusEvidenceDomainGuard(DecisionBackendPort):
 class HeuristicDecisionBackend(DecisionBackendPort):
     """Deterministic regex + lexical-overlap verdicts. Scores are overlap ratios, not calibrated probabilities."""
 
-    def __init__(self, config: HeuristicConfig, corpus_overlap: Optional[Callable[[str], float]] = None) -> None:
+    def __init__(self, config: Optional[HeuristicConfig] = None, corpus_overlap: Optional[Callable[[str], float]] = None) -> None:
         """corpus_overlap(query) -> best share of query terms found in one indexed chunk; lets questions
         about document content pass G1 even when they use none of the lexicon's domain vocabulary."""
         self.lexicon = load_json_template(LEXICON_PATH)
-        self.config = config
+        self.config = config or HeuristicConfig()
         self.corpus_overlap = corpus_overlap
 
     @property
@@ -471,3 +496,152 @@ class FallbackDecisionBackend(DecisionBackendPort):
             lambda: self.primary.assess_requirement(requirement_text, evidence_chunks, api_key),
             lambda: self.fallback.assess_requirement(requirement_text, evidence_chunks, api_key),
         )
+
+
+# ---------------------------------------------------------------------------------------------
+# Jev Decision Backend (Non-autoregressive discriminative model by TypeSafe AI)
+# ---------------------------------------------------------------------------------------------
+
+class JevDecisionBackend(DecisionBackendPort):
+    """Jev decision backend executed over OpenRouter (TypeSafe AI classification model).
+
+    Uses the OpenRouter client with the caller's BYOK key. Zero separate API keys or external endpoints.
+    Retries up to 3 times on transient failures before raising an explicit DecisionBackendError.
+    """
+
+    def __init__(self, llm_client: LLMClientPort, model: str, config: DecisionConfig) -> None:
+        self.llm_client = llm_client
+        self.model = model
+        self.config = config
+
+    @property
+    def name(self) -> str:
+        return f"jev:{self.model}"
+
+    @property
+    def supports_semantic_scan(self) -> bool:
+        return True
+
+    def _clip(self, text: str) -> str:
+        limit = self.config.llm_judge.max_chunk_chars
+        return text if len(text) <= limit else text[:limit] + " [...]"
+
+    async def _ask(self, template: str, schema: type[BaseModel], api_key: Optional[str], **values: str) -> Any:
+        prompt = render_template(f"prompts/{template}", **values)
+        max_attempts = getattr(self.config, "max_retries", 3)
+        retry_delay = getattr(self.config, "retry_delay_seconds", 1.0)
+        last_exc: Optional[Exception] = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                raw = await self.llm_client.generate_response(
+                    prompt=prompt,
+                    model=self.model,
+                    system_prompt=load_template("prompts/judge_system.txt"),
+                    temperature=0.0,
+                    api_key=api_key,
+                    json_output=True,
+                )
+                return _parse_json(raw, schema)
+            except (LLMInferenceError, UpstreamServiceError, DecisionBackendError) as exc:
+                last_exc = exc
+                if attempt < max_attempts:
+                    delay = retry_delay * (2 ** (attempt - 1))
+                    logger.warning(
+                        "Jev judge '%s' call '%s' failed (attempt %d/%d): %s; retrying in %.1fs...",
+                        self.model, template, attempt, max_attempts, exc, delay,
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(
+                        "Jev judge '%s' call '%s' failed after %d attempts: %s",
+                        self.model, template, max_attempts, exc,
+                    )
+                    raise DecisionBackendError(
+                        f"Jev decision judge '{self.model}' failed after {max_attempts} attempts: {exc}"
+                    ) from exc
+        raise DecisionBackendError(f"Jev decision judge '{self.model}' failed after {max_attempts} attempts: {last_exc}")
+
+    def _chunk_blocks(self, chunks: Sequence[DocumentChunk]) -> str:
+        return "\n".join(
+            f"[C{i}]\n<untrusted>\n{self._clip(c.text_content)}\n</untrusted>" for i, c in enumerate(chunks, start=1)
+        )
+
+    async def screen_query(self, query: str, api_key: Optional[str] = None) -> GateVerdict:
+        verdict: _G1 = await self._ask("judge_g1_input.txt", _G1, api_key, query=query)
+        return GateVerdict(
+            gate_id="G1",
+            passed=verdict.on_topic and not verdict.manipulation,
+            confidence=verdict.confidence,
+            reason=verdict.reason,
+            metadata={"manipulation": verdict.manipulation, "in_domain": verdict.on_topic, "backend": self.name},
+        )
+
+    async def route_query(self, query: str, available_strategies: Sequence[str], api_key: Optional[str] = None) -> GateVerdict:
+        strategies_block = "\n".join(f"- {s}" for s in available_strategies)
+        verdict: _G2 = await self._ask("judge_g2_route.txt", _G2, api_key, query=query, strategies=strategies_block)
+        return GateVerdict(
+            gate_id="G2",
+            passed=True,
+            confidence=verdict.confidence,
+            reason=verdict.reason,
+            metadata={"strategy": verdict.strategy, "backend": self.name},
+        )
+
+    async def judge_chunks(self, query: str, chunks: Sequence[DocumentChunk], api_key: Optional[str] = None) -> list[ChunkJudgement]:
+        if not chunks:
+            return []
+        verdict: _G3 = await self._ask("judge_g3_context.txt", _G3, api_key, query=query, chunks=self._chunk_blocks(chunks))
+        found = _by_id(verdict.chunks, [f"C{i}" for i in range(1, len(chunks) + 1)])
+        return [
+            ChunkJudgement(
+                chunk_id=c.chunk_id,
+                relevance=found[f"C{i}"].relevance,
+                injection_probability=found[f"C{i}"].injection_probability,
+                usefulness=found[f"C{i}"].usefulness,
+                backend=self.name,
+            )
+            for i, c in enumerate(chunks, start=1)
+        ]
+
+    async def verify_claims(self, claims: Sequence[tuple[str, Sequence[str], str]], api_key: Optional[str] = None) -> list[ClaimJudgement]:
+        if not claims:
+            return []
+        blocks = "\n\n".join(
+            f"[K{i}] Claim: {claim}\nEvidence:\n<untrusted>\n{self._clip(evidence) if evidence else '(no evidence cited)'}\n</untrusted>"
+            for i, (claim, _, evidence) in enumerate(claims, start=1)
+        )
+        verdict: _G4 = await self._ask("judge_g4_claims.txt", _G4, api_key, claims=blocks)
+        found = _by_id(verdict.claims, [f"K{i}" for i in range(1, len(claims) + 1)])
+        return [
+            ClaimJudgement(
+                claim=claim,
+                cited_chunk_ids=list(cited),
+                verdict=found[f"K{i}"].verdict,
+                reason=found[f"K{i}"].reason,
+                backend=self.name,
+            )
+            for i, (claim, cited, _) in enumerate(claims, start=1)
+        ]
+
+    async def scan_for_injection(self, chunks: Sequence[DocumentChunk], api_key: Optional[str] = None) -> dict[str, bool]:
+        results: dict[str, bool] = {}
+        batch_size = self.config.llm_judge.max_tier2_chunks_per_call
+        for offset in range(0, len(chunks), batch_size):
+            batch = list(chunks[offset : offset + batch_size])
+            verdict: _T2 = await self._ask("judge_tier2_scan.txt", _T2, api_key, chunks=self._chunk_blocks(batch))
+            found = _by_id(verdict.chunks, [f"C{i}" for i in range(1, len(batch) + 1)])
+            for i, c in enumerate(batch, start=1):
+                results[c.chunk_id] = found[f"C{i}"].injection
+        return results
+
+    async def assess_requirement(self, requirement_text: str, evidence_chunks: Sequence[DocumentChunk], api_key: Optional[str] = None) -> RequirementAssessment:
+        if not evidence_chunks:
+            return RequirementAssessment("Gap", None, "No lab evidence retrieved for this requirement.", self.name)
+        evidence = "\n".join(
+            f"[E{i}]\n<untrusted>\n{self._clip(c.text_content)}\n</untrusted>" for i, c in enumerate(evidence_chunks, start=1)
+        )
+        verdict: _Compliance = await self._ask("judge_compliance.txt", _Compliance, api_key, requirement=requirement_text, evidence=evidence)
+        return RequirementAssessment(verdict.status, verdict.evidence_id, verdict.rationale, self.name)
+
+

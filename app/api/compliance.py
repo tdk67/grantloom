@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, Header, Request, Response
 from fastapi.responses import StreamingResponse
 
 from app.api.deps import get_compliance_service, get_inference_profile, verify_master_api_key
+from app.core.errors import GrantLoomError
 from app.core.rate_limit import compliance_limit, limiter
 from app.services.compliance_service import ComplianceService
 from app.services.inference import InferenceProfile
@@ -46,8 +47,13 @@ async def evaluate_compliance_stream(
     api_key = await profile.authorize(x_openrouter_key)
 
     async def sse_event_stream() -> AsyncIterator[str]:
-        async for event_type, data in service.evaluate_solicitation_stream(solicitation_id, api_key):
-            yield f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+        try:
+            async for event_type, data in service.evaluate_solicitation_stream(solicitation_id, api_key):
+                yield f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+        except GrantLoomError as exc:
+            yield f"event: error\ndata: {json.dumps(exc.to_problem_details())}\n\n"
+        except Exception as exc:
+            yield f"event: error\ndata: {json.dumps({'title': 'Compliance Evaluation Error', 'detail': str(exc), 'status': 500})}\n\n"
 
     return StreamingResponse(
         sse_event_stream(),
