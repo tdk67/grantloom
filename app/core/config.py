@@ -114,7 +114,8 @@ DEFERRED_DECISION_BACKENDS = {"julia1"}
 
 class DecisionConfig(_Strict):
     backend: str
-    jev_model: str = "typesafe/jev-router"
+    jev_model: str
+    jev_base_url: str
     router_min_confidence: float
     domain_min_confidence: float
     injection_probability_threshold: float

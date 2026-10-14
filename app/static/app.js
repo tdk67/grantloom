@@ -503,14 +503,12 @@ function appendBotMessageSkeleton(messageId) {
     </div>
     <div class="message-body">Thinking...</div>
     <div class="message-warning hidden" role="alert"></div>`;
-  // Insert right below the newest user message at the top
-  const firstUser = elements.chatTranscript.querySelector(".message-user");
-  if (firstUser && firstUser.nextSibling) {
-    elements.chatTranscript.insertBefore(msg, firstUser.nextSibling);
-  } else if (firstUser) {
-    elements.chatTranscript.appendChild(msg);
+  // Insert directly below the newest user query at the top
+  const firstChild = elements.chatTranscript.firstChild;
+  if (firstChild && firstChild.nextSibling) {
+    elements.chatTranscript.insertBefore(msg, firstChild.nextSibling);
   } else {
-    elements.chatTranscript.insertBefore(msg, elements.chatTranscript.firstChild);
+    elements.chatTranscript.appendChild(msg);
   }
 }
 
@@ -532,6 +530,13 @@ function finalizeBotMessage(messageId, data) {
     const confPct = Math.round((data.confidence_score || 0) * 100);
     const confClass = !data.verified ? "confidence-low" : confPct < 85 ? "confidence-mid" : "confidence-high";
     confContainer.innerHTML = `<span class="confidence-badge ${confClass}">● ${data.verified ? "Verified" : "UNVERIFIED"} · ${confPct}%</span>`;
+  }
+
+  if (data.timings && data.timings.total_ms > 0) {
+    const t = data.timings;
+    const totalSec = (t.total_ms / 1000).toFixed(2);
+    const tip = `Guard: ${Math.round(t.guard_ms)}ms | Route: ${Math.round(t.route_ms)}ms | Retrieval: ${Math.round(t.retrieve_ms)}ms (Filter: ${Math.round(t.filter_ms)}ms) | Gen: ${Math.round(t.generate_ms)}ms | Verify: ${Math.round(t.verify_ms)}ms`;
+    confContainer.innerHTML += ` <span class="confidence-badge" style="background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); color: var(--text-secondary); cursor: help;" title="${tip}">⏱️ ${totalSec}s</span>`;
   }
 
   for (const c of data.citations || []) state.lastCitations[c.chunk_id] = c;

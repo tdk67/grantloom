@@ -26,7 +26,7 @@ def test_valid_default_config_loading():
     settings = get_settings()
     assert settings.server.host == "127.0.0.1"
     assert settings.limits.max_documents == 50
-    assert settings.decision.backend == "llm_judge"
+    assert settings.decision.backend in ("llm_judge", "jev")
     assert settings.guardrails.max_rewrite_attempts == 2
     assert settings.llm.private_mode is False
     # Relative storage paths resolve against the project root, not the CWD

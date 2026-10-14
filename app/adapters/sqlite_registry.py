@@ -396,7 +396,11 @@ class SqliteRegistryAdapter(RegistryPort):
         if not tokens:
             return []
 
-        match_query = " OR ".join(f'"{t}"' for t in tokens)
+        # Include consecutive bigram phrases to boost exact phrase matches (e.g. "cost share")
+        phrases = [f'"{tokens[i]} {tokens[i+1]}"' for i in range(len(tokens) - 1)]
+        unigrams = [f'"{t}"' for t in tokens]
+        all_terms = phrases + unigrams
+        match_query = " OR ".join(all_terms)
         sql = text("""
             SELECT f.chunk_id, f.doc_id, f.text_content, bm25(chunks_fts) as rank
             FROM chunks_fts f

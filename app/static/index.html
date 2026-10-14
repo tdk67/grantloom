@@ -139,6 +139,19 @@
           </div>
         </div>
 
+        <!-- Input Area (Hero-first at the top) -->
+        <div class="chat-input-card">
+          <form id="chat-form" class="chat-form">
+            <textarea id="chat-input" class="chat-textarea" placeholder="Ask a grant question (e.g. 'What is the travel budget total?' or 'Is Dr. Elena Vance eligible as PI?')" rows="3" required></textarea>
+            <div class="chat-form-footer">
+              <span class="keyboard-hint">Press <strong>Enter</strong> to submit, <strong>Shift+Enter</strong> for newline</span>
+              <button type="submit" id="btn-submit-ask" class="btn btn-primary">
+                <span>Submit Query 🚀</span>
+              </button>
+            </div>
+          </form>
+        </div>
+
         <!-- Live SSE Reasoning Status Trail -->
         <div id="reasoning-trail" class="reasoning-trail hidden" role="status" aria-live="polite">
           <div id="pill-guard" class="trail-pill"><span>1. Guard</span></div>
@@ -155,19 +168,6 @@
             <h3>Ground-Truth Grant Reasoning</h3>
             <p>Every statement is verified against indexed chunks with physical page coordinates. Click on any citation badge to inspect the original text.</p>
           </div>
-        </div>
-
-        <!-- Input Area -->
-        <div class="chat-input-card">
-          <form id="chat-form" class="chat-form">
-            <textarea id="chat-input" class="chat-textarea" placeholder="Ask a grant question (e.g. 'What is the travel budget total?' or 'Is Dr. Elena Vance eligible as PI?')" rows="3" required></textarea>
-            <div class="chat-form-footer">
-              <span class="keyboard-hint">Press <strong>Enter</strong> to submit, <strong>Shift+Enter</strong> for newline</span>
-              <button type="submit" id="btn-submit-ask" class="btn btn-primary">
-                <span>Submit Query 🚀</span>
-              </button>
-            </div>
-          </form>
         </div>
       </section>
 
@@ -332,6 +332,6 @@
     </div>
   </div>
 
-  <script type="module" src="/app.js"></script>
+  <script type="module" src="/app.js?v=4"></script>
 </body>
 </html>

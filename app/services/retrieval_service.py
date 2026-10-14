@@ -113,7 +113,11 @@ class HybridRetrievalService:
 
         bm25_overlap_ratio = (best_overlap / len(query_tokens)) if query_tokens else 0.0
         dense_relevant = max_dense_score >= cfg.min_relevance_threshold
-        keyword_relevant = bm25_overlap_ratio >= cfg.min_bm25_overlap
+        # Calibrated lexical relevance: matching at least min(2, len(query_tokens)) key terms
+        # in top BM25 results or meeting overlap ratio threshold confirms relevance without
+        # falsely aborting multi-clause or comparative queries.
+        min_overlap_required = min(2, len(query_tokens)) if query_tokens else 1
+        keyword_relevant = (bool(bm25_results) and best_overlap >= min_overlap_required) or (bm25_overlap_ratio >= cfg.min_bm25_overlap)
         max_relevance_signal = max(max_dense_score, bm25_overlap_ratio)
 
         if not (dense_relevant or keyword_relevant):

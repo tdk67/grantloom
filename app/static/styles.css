@@ -664,8 +664,7 @@ body {
   border: 1px solid var(--border-subtle);
   border-radius: 8px;
   padding: 14px;
-  position: sticky;
-  bottom: 20px;
+  margin-bottom: 20px;
 }
 
 .chat-textarea {

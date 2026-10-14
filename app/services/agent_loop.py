@@ -16,10 +16,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Optional, Sequence
 
 from app.core.config import Settings
+from app.evaluation.telemetry import PipelineLatencyProfile
 from app.core.errors import GrantLoomError
 from app.core.metrics import REWRITES
 from app.core.templates import load_template, render_template
@@ -76,6 +78,8 @@ class AgentRunResult:
     attempts: int = 0
     context_texts: list[str] = field(default_factory=list)
     events: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    timings: dict[str, Any] = field(default_factory=dict)
+    latency_profile: Optional[PipelineLatencyProfile] = None
 
 
 @dataclass
@@ -86,6 +90,7 @@ class RetrievalOutcome:
     retrieval: RetrievalResult
     dropped: list[dict[str, str]]
     filter_backend: str
+    filter_ms: float = 0.0
 
     @property
     def abstention(self) -> bool:
@@ -186,10 +191,12 @@ class RetrieverAgent:
         for o in outcomes:
             executions.append(AgentToolExecution(o.tool_name, o.arguments, o.result_count, o.status, o.duration_ms))
 
+        t_filter_start = time.perf_counter()
         filtered = await self.context_filter.filter(query, retrieval.chunks, retrieval.dense_scores, api_key)
         tool_chunks, tool_dropped = self.context_filter.screen_tool_evidence(
             [c for o in outcomes for c in o.evidence_chunks]
         )
+        filter_ms = (time.perf_counter() - t_filter_start) * 1000.0
         merged: dict[str, DocumentChunk] = {}
         for c in [*tool_chunks, *filtered.chunks]:
             merged.setdefault(c.chunk_id, c)
@@ -201,6 +208,7 @@ class RetrieverAgent:
             retrieval=retrieval,
             dropped=filtered.dropped + tool_dropped,
             filter_backend=filtered.backend,
+            filter_ms=filter_ms,
         )
 
 
@@ -234,7 +242,8 @@ class WriterAgent:
         prompt += f"\n\nQuestion: {query}\n"
         if issues:
             prompt += "\n" + render_template("prompts/writer_rewrite_feedback.txt", issues="\n".join(issues)) + "\n"
-        return prompt + "\nAnswer with explicit [chunk_id] citations:"
+        valid_ids = ", ".join(f"[{c.chunk_id}]" for c in chunks) if chunks else "none"
+        return prompt + f"\nAnswer with explicit [chunk_id] citations (available IDs: {valid_ids}):"
 
     def stream(self, prompt: str, api_key: Optional[str]) -> AsyncIterator[str]:
         return self.llm_client.stream_response(
@@ -293,13 +302,26 @@ class AgentLoopOrchestrator:
         # 0. FR-Q10 egress / provenance: where data goes before any model call
         yield ("egress", self.egress)
 
+        profile = PipelineLatencyProfile()
+        t_pipeline_start = time.perf_counter()
+
         # 1+2. G1 input guard and G2 strategy router depend only on the query: run both judge
         # calls in parallel (latency). If G1 refuses, the routing result is discarded.
         available = self.planner.available_strategies()
-        g1_task = asyncio.create_task(self.planner.input_guard.evaluate(query, api_key))
-        g2_task = asyncio.create_task(self.planner.strategy_router.evaluate(query, available, api_key))
+        t_guards_start = time.perf_counter()
+
+        async def _run_g1():
+            res = await self.planner.input_guard.evaluate(query, api_key)
+            return res, (time.perf_counter() - t_guards_start) * 1000.0
+
+        async def _run_g2():
+            res = await self.planner.strategy_router.evaluate(query, available, api_key)
+            return res, (time.perf_counter() - t_guards_start) * 1000.0
+
+        g1_task = asyncio.create_task(_run_g1())
+        g2_task = asyncio.create_task(_run_g2())
         try:
-            g1 = await g1_task
+            g1, profile.guard_ms = await g1_task
         except BaseException:
             g2_task.cancel()
             raise
@@ -311,21 +333,27 @@ class AgentLoopOrchestrator:
                 await g2_task
             refusal = g1.metadata.get("refusal") or g1.metadata.get("message") or "Your query was declined by the input guardrail."
             yield ("generate", {"token": refusal, "attempt": 0})
+            profile.total_ms = (time.perf_counter() - t_pipeline_start) * 1000.0
             yield ("done", {
                 "answer": refusal, "citations": [], "confidence_score": 0.0, "abstention": False,
                 "refusal": True, "refusal_reason": g1.reason, "verified": False,
+                "timings": profile.to_dict(),
             })
             return
         sanitized = g1.metadata.get("sanitized_query", query)
-        g2 = await g2_task
+        g2, profile.route_ms = await g2_task
         strategy = g2.metadata["strategy"]
         plan = AgentPlan(intent=g2.reason, strategy=strategy, selected_tools=self.planner.tools_for(strategy))
         yield ("route", gate_event(g2, strategy=strategy, available_strategies=available))
         yield ("plan", {"strategy": strategy, "tools": plan.selected_tools})
 
         # 3. Retriever agent (tools + G3)
+        t_ret_start = time.perf_counter()
         outcome = await self.retriever.execute(sanitized, plan, api_key)
+        profile.retrieve_ms = (time.perf_counter() - t_ret_start) * 1000.0
+        profile.filter_ms = outcome.filter_ms
         for execution in outcome.tool_executions:
+            profile.tool_timings[execution.tool_name] = execution.duration_ms
             yield ("tool", {
                 "tool": execution.tool_name, "status": execution.status, "result_count": execution.result_count,
                 "duration_ms": execution.duration_ms, "arguments": execution.arguments,
@@ -348,11 +376,13 @@ class AgentLoopOrchestrator:
 
         # FR-Q8 abstention contract
         if outcome.abstention:
+            profile.total_ms = (time.perf_counter() - t_pipeline_start) * 1000.0
             yield ("generate", {"token": ABSTENTION_MESSAGE, "attempt": 0})
             yield ("verify", {"gate": "G4", "verified": True, "confidence_score": 1.0, "citations_count": 0})
             yield ("done", {
                 "answer": ABSTENTION_MESSAGE, "citations": [], "confidence_score": 1.0, "abstention": True,
                 "strategy": strategy, "verified": True, "tool_executions": [e.__dict__ for e in outcome.tool_executions],
+                "timings": profile.to_dict(),
             })
             return
 
@@ -366,21 +396,34 @@ class AgentLoopOrchestrator:
         for attempt in range(1, max_drafts + 1):
             prompt = self.writer.build_prompt(sanitized, outcome.chunks, outcome.tool_evidence, issues)
             tokens: list[str] = []
+            t_write_start = time.perf_counter()
+            first_token_seen = False
             async for token in self.writer.stream(prompt, api_key):
+                if not first_token_seen and profile.first_token_ms == 0.0:
+                    profile.first_token_ms = (time.perf_counter() - t_write_start) * 1000.0
+                    first_token_seen = True
                 tokens.append(token)
                 yield ("generate", {"token": token, "attempt": attempt})
+            profile.generate_ms += (time.perf_counter() - t_write_start) * 1000.0
+            profile.token_count += len(tokens)
             draft = "".join(tokens)
 
             if ABSTENTION_MESSAGE.lower() in draft.lower() and "[" not in draft:
+                profile.total_ms = (time.perf_counter() - t_pipeline_start) * 1000.0
+                if profile.generate_ms > 0 and profile.token_count > 0:
+                    profile.tokens_per_second = profile.token_count / (profile.generate_ms / 1000.0)
                 yield ("verify", {"gate": "G4", "verified": True, "confidence_score": 1.0, "citations_count": 0, "attempt": attempt})
                 yield ("done", {
                     "answer": ABSTENTION_MESSAGE, "citations": [], "confidence_score": 1.0, "abstention": True,
                     "strategy": strategy, "verified": True, "attempts": attempt,
                     "context_chunk_ids": context_ids, "tool_executions": [e.__dict__ for e in outcome.tool_executions],
+                    "timings": profile.to_dict(),
                 })
                 return
 
+            t_val_start = time.perf_counter()
             result = await self.validator.validate(draft, context_ids, outcome.tool_evidence, api_key)
+            profile.verify_ms += (time.perf_counter() - t_val_start) * 1000.0
             yield ("verify", {
                 "gate": "G4",
                 "attempt": attempt,
@@ -407,16 +450,18 @@ class AgentLoopOrchestrator:
             })
 
         assert result is not None
+        profile.total_ms = (time.perf_counter() - t_pipeline_start) * 1000.0
+        if profile.generate_ms > 0 and profile.token_count > 0:
+            profile.tokens_per_second = profile.token_count / (profile.generate_ms / 1000.0)
+
         if not result.citations:
-            # An answer without proper citations is not accepted: after every rewrite attempt the
-            # draft still has no resolvable [chunk_id] citation, so it is discarded and reported as
-            # "no answer found" instead of being surfaced as unverified prose.
             logger.warning("Final draft discarded: no resolvable citations after %d attempt(s).", attempt)
             yield ("done", {
                 "answer": ABSTENTION_MESSAGE, "citations": [], "confidence_score": 0.0, "abstention": True,
                 "strategy": strategy, "verified": False, "attempts": attempt,
                 "warning": "The generated draft cited no verifiable source and was discarded.",
                 "context_chunk_ids": context_ids, "tool_executions": [e.__dict__ for e in outcome.tool_executions],
+                "timings": profile.to_dict(),
             })
             return
         verified = result.passed
@@ -433,6 +478,7 @@ class AgentLoopOrchestrator:
             "unverified_claims": [c.claim for c in result.unsupported_claims],
             "context_chunk_ids": context_ids,
             "tool_executions": [e.__dict__ for e in outcome.tool_executions],
+            "timings": profile.to_dict(),
         }
         if not verified:
             done["warning"] = UNVERIFIED_WARNING
@@ -477,4 +523,5 @@ class AgentLoopOrchestrator:
             attempts=done.get("attempts", 0),
             context_texts=context_texts,
             events=events,
+            timings=done.get("timings", {}),
         )

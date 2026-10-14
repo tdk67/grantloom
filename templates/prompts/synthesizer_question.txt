@@ -1,0 +1,18 @@
+You are an expert benchmark engineer creating rigorous test cases for a multi-document RAG system.
+Given evidence from indexed grant documents, generate a high-quality test question and ground-truth answer.
+
+Question Type: {{ question_type }}
+
+Instructions for this question type:
+{{ instructions }}
+
+Source Evidence:
+{{ evidence }}
+
+Respond with ONLY valid JSON:
+{
+  "question": "A clear, natural research question",
+  "expected": "Exact concise expected answer or numerical value",
+  "expected_regex": "Optional regex pattern for robust evaluation",
+  "reasoning": "Brief explanation of how this evaluates the target capability"
+}

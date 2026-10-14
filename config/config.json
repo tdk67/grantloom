@@ -25,8 +25,8 @@
   "models": {
     "writer_model": "deepseek/deepseek-v4-flash",
     "judge_model": "openai/gpt-4o-mini",
-    "embedding_backend": "deterministic",
-    "embedding_model": "text-embedding-3-small",
+    "embedding_backend": "openrouter",
+    "embedding_model": "openai/text-embedding-3-small",
     "embedding_dimension": 1536
   },
   "retrieval": {
@@ -35,8 +35,8 @@
     "rrf_k": 60,
     "min_relevance_threshold": 0.35,
     "min_bm25_overlap": 0.35,
-    "rerank_top_k": 5,
-    "top_k_after_filter": 5,
+    "rerank_top_k": 10,
+    "top_k_after_filter": 10,
     "max_structured_tables": 6,
     "max_tool_evidence_chunks": 6
   },
@@ -61,8 +61,9 @@
     "citation_excerpt_chars": 2500
   },
   "decision": {
-    "backend": "llm_judge",
-    "jev_model": "typesafe/jev-router",
+    "backend": "jev",
+    "jev_model": "typesafe/jev-1.13",
+    "jev_base_url": "https://openrouter.ai/api/alpha/decisions",
     "router_min_confidence": 0.6,
     "domain_min_confidence": 0.6,
     "injection_probability_threshold": 0.5,
