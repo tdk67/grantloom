@@ -374,25 +374,38 @@ class AgentLoopOrchestrator:
             "backend": outcome.filter_backend,
         })
 
-        # FR-Q8 abstention contract
+        # FR-Q8 abstention contract (review-08 F2): an abstention is NOT a verified 100% answer.
+        # Report why the pipeline abstained and mark confidence as N/A (0.0) instead of the old
+        # hardcoded 1.0 that pretended verification had happened.
         if outcome.abstention:
             profile.total_ms = (time.perf_counter() - t_pipeline_start) * 1000.0
+            abstention_reason = "Retrieval returned no evidence above the relevance threshold (max relevance %.3f)." % (
+                outcome.retrieval.max_relevance
+            )
             yield ("generate", {"token": ABSTENTION_MESSAGE, "attempt": 0})
-            yield ("verify", {"gate": "G4", "verified": True, "confidence_score": 1.0, "citations_count": 0})
+            yield ("verify", {
+                "gate": "G4", "verified": True, "confidence_score": 0.0, "citations_count": 0,
+                "confidence_reasons": [abstention_reason],
+            })
             yield ("done", {
-                "answer": ABSTENTION_MESSAGE, "citations": [], "confidence_score": 1.0, "abstention": True,
+                "answer": ABSTENTION_MESSAGE, "citations": [], "confidence_score": 0.0, "abstention": True,
                 "strategy": strategy, "verified": True, "tool_executions": [e.__dict__ for e in outcome.tool_executions],
+                "confidence_reasons": [abstention_reason],
                 "timings": profile.to_dict(),
             })
             return
 
-        # 4-5. Writer + validator with bounded rewrite loop
+        # 4-5. Writer + validator with bounded rewrite loop (review-08 F3: fail fast on repeated
+        # identical verdicts instead of burning all rewrites on a writer that keeps hedging).
         context_ids = [c.chunk_id for c in outcome.chunks]
         max_drafts = 1 + self.settings.guardrails.max_rewrite_attempts
         issues: list[str] = []
         result: Optional[VerificationResult] = None
         draft = ""
         attempt = 0
+        # (verdict_key -> count): stop rewriting once the same rejection repeats, e.g. the writer
+        # keeps emitting the same unsupported claim / the same uncited abstention.
+        seen_verdicts: dict[str, int] = {}
         for attempt in range(1, max_drafts + 1):
             prompt = self.writer.build_prompt(sanitized, outcome.chunks, outcome.tool_evidence, issues, draft=draft)
             tokens: list[str] = []
@@ -416,11 +429,13 @@ class AgentLoopOrchestrator:
                 profile.total_ms = (time.perf_counter() - t_pipeline_start) * 1000.0
                 if profile.generate_ms > 0 and profile.token_count > 0:
                     profile.tokens_per_second = profile.token_count / (profile.generate_ms / 1000.0)
-                yield ("verify", {"gate": "G4", "verified": True, "confidence_score": 1.0, "citations_count": 0, "attempt": attempt})
+                reason = "The writer declined to answer (uncited abstention draft); no claims were verified."
+                yield ("verify", {"gate": "G4", "verified": True, "confidence_score": 0.0, "citations_count": 0, "attempt": attempt, "confidence_reasons": [reason]})
                 yield ("done", {
-                    "answer": ABSTENTION_MESSAGE, "citations": [], "confidence_score": 1.0, "abstention": True,
+                    "answer": ABSTENTION_MESSAGE, "citations": [], "confidence_score": 0.0, "abstention": True,
                     "strategy": strategy, "verified": True, "attempts": attempt,
                     "context_chunk_ids": context_ids, "tool_executions": [e.__dict__ for e in outcome.tool_executions],
+                    "confidence_reasons": [reason],
                     "timings": profile.to_dict(),
                 })
                 return
@@ -438,12 +453,29 @@ class AgentLoopOrchestrator:
                 "faithfulness": result.faithfulness,
                 "unsupported_claims": [c.claim for c in result.unsupported_claims],
                 "confidence_score": result.confidence_score,
+                "confidence_reasons": result.confidence_reasons,
                 "backend": result.backend,
             })
-            if result.passed or attempt == max_drafts:
+            if result.passed:
                 break
+            # Review-08 F3: identical rejection verdicts (same unsupported claim text, same missing
+            # citations) mean another rewrite will produce the same outcome. Fail fast instead.
+            verdict_key = "|".join(sorted(result.confidence_reasons)) + "|unresolved=" + "|".join(sorted(result.unresolved_ids))
+            seen_verdicts[verdict_key] = seen_verdicts.get(verdict_key, 0) + 1
             issues = result.issues()
             reason = "unresolved_citations" if (result.unresolved_ids or not result.citations) else "unsupported_claims"
+            exhausted_early = seen_verdicts[verdict_key] >= 2
+            if exhausted_early or attempt == max_drafts:
+                REWRITES.labels(reason=reason).inc()
+                yield ("rewrite", {
+                    "attempt": attempt,
+                    "max_attempts": self.settings.guardrails.max_rewrite_attempts,
+                    "reason": reason,
+                    "issues": issues,
+                    "discard_draft": True,
+                    "exhausted_early": exhausted_early,
+                })
+                break
             REWRITES.labels(reason=reason).inc()
             yield ("rewrite", {
                 "attempt": attempt,
@@ -460,10 +492,12 @@ class AgentLoopOrchestrator:
 
         if not result.citations:
             logger.warning("Final draft discarded: no resolvable citations after %d attempt(s).", attempt)
+            reason = "Every generated draft cited no verifiable source and was discarded after %d attempt(s)." % attempt
             yield ("done", {
                 "answer": ABSTENTION_MESSAGE, "citations": [], "confidence_score": 0.0, "abstention": True,
                 "strategy": strategy, "verified": False, "attempts": attempt,
                 "warning": "The generated draft cited no verifiable source and was discarded.",
+                "confidence_reasons": [reason] + result.confidence_reasons,
                 "context_chunk_ids": context_ids, "tool_executions": [e.__dict__ for e in outcome.tool_executions],
                 "timings": profile.to_dict(),
             })
@@ -480,6 +514,7 @@ class AgentLoopOrchestrator:
             "verified": verified,
             "attempts": attempt,
             "unverified_claims": [c.claim for c in result.unsupported_claims],
+            "confidence_reasons": result.confidence_reasons,
             "context_chunk_ids": context_ids,
             "tool_executions": [e.__dict__ for e in outcome.tool_executions],
             "timings": profile.to_dict(),

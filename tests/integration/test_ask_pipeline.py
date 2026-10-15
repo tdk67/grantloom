@@ -157,15 +157,22 @@ async def test_unsupported_claim_triggers_rewrite_then_passes(stack, tmp_path):
 
 @pytest.mark.asyncio
 async def test_rewrite_exhaustion_returns_unverified_warning(stack, tmp_path):
+    """A writer that repeats the same unverified claim must not burn every rewrite: the repeated
+    rejection is detected and the run fails fast (review-08 F3) with the same honest outcome."""
     doc_id = await _ingest_solicitation(stack, tmp_path)
     page1 = next(c for c in stack.registry.get_chunks_for_document(doc_id) if c.page_number == 1)
     llm = ScriptedLLM(drafts=[f"The equipment threshold is $75,000 for every purchase [{page1.chunk_id}]."])
     _, events = await _ask(stack.app(llm), "What is the equipment threshold?")
     done = dict(events)["done"]
     max_drafts = 1 + stack.settings.guardrails.max_rewrite_attempts
-    assert llm.draft_calls == max_drafts
+    # Fails fast once the identical rejection repeats (2 drafts, not all 3), yet still reports
+    # the unsupported claim and the unverified warning instead of silently dropping the answer.
+    assert llm.draft_calls == 2 and llm.draft_calls < max_drafts
     assert done["verified"] is False and done["warning"] == UNVERIFIED_WARNING
     assert done["unverified_claims"]
+    # The early-exit rewrite event carries the flag so the UI can explain the stop.
+    rewrites = [p for n, p in events if n == "rewrite"]
+    assert rewrites and rewrites[-1]["exhausted_early"] is True
 
 
 @pytest.mark.asyncio

@@ -450,12 +450,20 @@ function handleSSEEvent(eventType, data, messageId, draft) {
   } else if (eventType === "rewrite") {
     // The validator rejected the draft: discard it before the rewrite streams in.
     if (data.discard_draft) draft.text = "";
-    updateBotMessage(messageId, `Rewriting after verification feedback (attempt ${data.attempt + 1})...`);
-    setPill("pill-generate", "active", `4. Rewriting (attempt ${data.attempt + 1})`);
+    if (data.exhausted_early) {
+      updateBotMessage(messageId, "Rewriting stopped early — the same unverified claim repeated; giving up on this draft.");
+      setPill("pill-generate", "active", `4. Gave up after identical rejection (attempt ${data.attempt})`);
+    } else {
+      updateBotMessage(messageId, `Rewriting after verification feedback (attempt ${data.attempt + 1})...`);
+      setPill("pill-generate", "active", `4. Rewriting (attempt ${data.attempt + 1})`);
+    }
   } else if (eventType === "verify") {
     setPill("pill-generate", "done");
+    const conf = data.verified && data.confidence_score > 0
+      ? ` (${Math.round((data.confidence_score || 0) * 100)}%)`
+      : data.verified ? " (abstained — no verified claims)" : "";
     setPill("pill-verify", data.verified ? "done" : "active",
-      `5. ${data.verified ? "Verified" : "Not verified"} (${Math.round((data.confidence_score || 0) * 100)}%)`);
+      `5. ${data.verified ? "Verified" : "Not verified"}${conf}`);
   } else if (eventType === "error") {
     updateBotMessage(messageId, `⚠️ ${data.detail || "Pipeline error"}`);
   } else if (eventType === "done") {
@@ -487,9 +495,10 @@ function appendUserMessage(text) {
   msg.innerHTML = `
     <div class="message-header"><span>Researcher Query</span></div>
     <div class="message-body">${escapeHtml(text)}</div>`;
-  // Prepend to top so newest question and answer stay at the top
+  // Prepend to top so newest question and answer stay at the top.
+  // Review-08 F5: NO scrollIntoView here — the newest item is at the top and the page
+  // must not jump to the bottom of the transcript while a stream is running.
   elements.chatTranscript.insertBefore(msg, elements.chatTranscript.firstChild);
-  msg.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function appendBotMessageSkeleton(messageId) {
@@ -527,11 +536,13 @@ function finalizeBotMessage(messageId, data) {
   if (data.refusal) {
     confContainer.innerHTML = `<span class="confidence-badge confidence-low">● Declined by input guard</span>`;
   } else if (data.abstention) {
-    confContainer.innerHTML = `<span class="confidence-badge confidence-mid">● Not found in documents</span>`;
+    // Review-08 F2: abstention is NOT a verified answer — no fake 100%.
+    confContainer.innerHTML = `<span class="confidence-badge confidence-mid">● No answer found in documents</span>`;
   } else {
     const confPct = Math.round((data.confidence_score || 0) * 100);
     const confClass = !data.verified ? "confidence-low" : confPct < 85 ? "confidence-mid" : "confidence-high";
-    confContainer.innerHTML = `<span class="confidence-badge ${confClass}">● ${data.verified ? "Verified" : "UNVERIFIED"} · ${confPct}%</span>`;
+    const label = data.verified ? `Verified · ${confPct}%` : `UNVERIFIED · ${confPct}%`;
+    confContainer.innerHTML = `<span class="confidence-badge ${confClass}">● ${label}</span>`;
   }
 
   if (data.timings && data.timings.total_ms > 0) {
@@ -539,6 +550,28 @@ function finalizeBotMessage(messageId, data) {
     const totalSec = (t.total_ms / 1000).toFixed(2);
     const tip = `Guard: ${Math.round(t.guard_ms)}ms | Route: ${Math.round(t.route_ms)}ms | Retrieval: ${Math.round(t.retrieve_ms)}ms (Filter: ${Math.round(t.filter_ms)}ms) | Gen: ${Math.round(t.generate_ms)}ms | Verify: ${Math.round(t.verify_ms)}ms`;
     confContainer.innerHTML += ` <span class="confidence-badge" style="background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); color: var(--text-secondary); cursor: help;" title="${tip}">⏱️ ${totalSec}s</span>`;
+  }
+
+  // Review-08 F2: show WHY the result has the confidence it has (verdict reasons from G4).
+  const reasons = data.confidence_reasons || [];
+  if (reasons.length > 0) {
+    const verdictBox = document.createElement("div");
+    verdictBox.className = "verdict-reasons";
+    if (data.verified && !data.abstention) {
+      verdictBox.innerHTML = `<div class="verdict-title">Verification verdict</div>`;
+    } else {
+      verdictBox.innerHTML = `<div class="verdict-title">Why this result</div>`;
+    }
+    const list = document.createElement("ul");
+    reasons.forEach((r) => {
+      const li = document.createElement("li");
+      li.textContent = r;
+      list.appendChild(li);
+    });
+    verdictBox.appendChild(list);
+    const existing = msg.querySelector(".verdict-reasons");
+    if (existing) existing.remove();
+    msg.appendChild(verdictBox);
   }
 
   for (const c of data.citations || []) state.lastCitations[c.chunk_id] = c;
@@ -858,7 +891,8 @@ async function loadStarterPrompts() {
         switchTab("qa");
         elements.chatInput.value = ex.question;
         elements.chatInput.focus();
-        elements.chatInput.scrollIntoView({ behavior: "smooth" });
+        // Review-08 F5: do not force-scroll to the input; the sidebar lives above the transcript
+        // and the user's scroll position must be preserved.
       };
       card.addEventListener("click", selectPrompt);
       card.addEventListener("keydown", (e) => {
