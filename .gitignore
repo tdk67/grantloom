@@ -69,3 +69,7 @@ e2e/
 
 # scratch experiments (never committed)
 scratch/
+
+# Local eval exports (regenerate with run_benchmark --format ragas / eval_ragas --out)
+ragas_*.json
+eval_results_*.json

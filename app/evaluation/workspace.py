@@ -67,6 +67,7 @@ class EvalWorkspace:
     writer_label: str
     eval_client: Optional[LLMClientPort] = None
     eval_model: Optional[str] = None
+    pipeline_judge_model: str = ""
     generated_files: list[dict[str, Any]] = field(default_factory=list)
     solicitation_count: int = 10
     api_key: Optional[str] = None
@@ -149,7 +150,7 @@ async def provision_eval_workspace(
         await client.validate_api_key(api_key)
         resolved_writer_model = writer_model or settings.models.writer_model
         resolved_judge_model = judge_model or settings.models.judge_model
-        resolved_eval_model = evaluator_model or settings.models.judge_model
+        resolved_eval_model = evaluator_model or settings.evaluation.judge_model
     elif writer_provider == "ollama":
         client = OllamaClientAdapter(
             base_url=settings.llm.ollama_base_url,
@@ -166,10 +167,14 @@ async def provision_eval_workspace(
         resolved_judge_model = judge_model or "custom"
         resolved_eval_model = evaluator_model or "custom"
 
-    # Enforce model independence between writer and evaluator
+    # NFR-6: the evaluator must be independent of everything under test. A shared family would make
+    # the scores self-graded, so refuse to run rather than warn.
     independence_issues = evaluator_independence_problems(resolved_writer_model, resolved_eval_model)
+    independence_issues += evaluator_independence_problems(resolved_judge_model, resolved_eval_model)
+    if settings.decision.backend == "jev":
+        independence_issues += evaluator_independence_problems(settings.decision.jev_model, resolved_eval_model)
     if independence_issues:
-        logger.warning("Evaluator independence warning: %s", independence_issues[0])
+        raise ValueError("Evaluator independence violated (NFR-6): " + "; ".join(independence_issues))
 
     llm: LLMClientPort = custom_llm_client or client
     profile = InferenceProfile(
@@ -188,7 +193,8 @@ async def provision_eval_workspace(
             corpus_overlap=lambda q: corpus_overlap(registry, q),
             api_key=api_key,
         )
-    evaluator = decision_backend if settings.decision.backend == "jev" else LLMJudgeDecisionBackend(client, resolved_eval_model, settings.decision)
+    # Always a dedicated judge on the independent evaluator model; never the pipeline's own G4 backend.
+    evaluator = LLMJudgeDecisionBackend(client, resolved_eval_model, settings.decision)
 
     key_vault = EphemeralKeyVault()
     embedder = build_embedder(settings)
@@ -249,10 +255,11 @@ async def provision_eval_workspace(
         graph_store=graph_store,
         ask_service=ask_service,
         evaluator=evaluator,
-        evaluator_label=f"jev:{settings.decision.jev_model}" if settings.decision.backend == "jev" else f"{writer_provider}:{resolved_eval_model}",
+        evaluator_label=f"{writer_provider}:{resolved_eval_model}",
         writer_label=f"{writer_provider}:{resolved_writer_model}",
         eval_client=client,
         eval_model=resolved_eval_model,
+        pipeline_judge_model=resolved_judge_model,
         generated_files=generated["files"],
         solicitation_count=solicitation_count,
         api_key=api_key,

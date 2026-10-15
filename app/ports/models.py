@@ -167,3 +167,5 @@ class ScanReport:
     tier1_flagged_chunk_ids: list[str]
     tier2_status: str  # completed, skipped:<reason>, failed:<reason>
     reasons: list[str] = field(default_factory=list)
+    # Confidently non-English chunks: invisible to the English Tier 1 patterns, routed to Tier 2.
+    non_english_chunk_ids: list[str] = field(default_factory=list)

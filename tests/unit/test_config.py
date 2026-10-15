@@ -136,3 +136,7 @@ def test_default_config_satisfies_evaluator_independence():
     s = get_settings()
     assert evaluator_independence_problems(s.models.writer_model, s.models.judge_model) == []
     assert evaluator_independence_problems(s.llm.ollama_writer_model, s.llm.ollama_judge_model) == []
+    # the offline eval judge must be independent of writer, pipeline judge and decision model
+    assert evaluator_independence_problems(s.models.writer_model, s.evaluation.judge_model) == []
+    assert evaluator_independence_problems(s.models.judge_model, s.evaluation.judge_model) == []
+    assert evaluator_independence_problems(s.decision.jev_model, s.evaluation.judge_model) == []

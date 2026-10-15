@@ -45,18 +45,19 @@ def _percentile(values: Sequence[float], p: float) -> float:
 @dataclass
 class TriadScore:
     """The RAG Triad: Context Relevance, Faithfulness, and Answer Relevance."""
-    context_relevance: float = 0.0
+    # None means "not applicable / not measured" (refusals, abstentions, offline judge). It is never
+    # replaced by 0.0 or 1.0, so it cannot move a corpus mean.
+    context_relevance: Optional[float] = None
     faithfulness: Optional[float] = None
     answer_relevance: Optional[float] = None
-    citation_resolvability: float = 0.0
+    citation_resolvability: Optional[float] = None
     sql_execution_match: Optional[bool] = None
 
     def average_score(self) -> float:
-        components = [self.context_relevance, self.citation_resolvability]
-        if self.faithfulness is not None:
-            components.append(self.faithfulness)
-        if self.answer_relevance is not None:
-            components.append(self.answer_relevance)
+        components = [
+            v for v in (self.context_relevance, self.faithfulness, self.answer_relevance, self.citation_resolvability)
+            if v is not None
+        ]
         return sum(components) / len(components) if components else 0.0
 
 
@@ -80,6 +81,7 @@ class TestCaseResult:
     blocked: bool = False
     attempts: int = 0
     contexts: list[str] = field(default_factory=list)
+    reference: str = ""
     error: Optional[str] = None
 
 
@@ -101,6 +103,7 @@ class BenchmarkReport:
     results: list[TestCaseResult] = field(default_factory=list)
     writer_model: str = ""
     judge_model: str = ""
+    pipeline_judge_model: str = ""
 
 
 class BenchmarkHarness:
@@ -129,12 +132,7 @@ class BenchmarkHarness:
         # 1. Check for expected guardrail refusal
         if test.adversarial:
             passed = run_result.blocked is True
-            triad = TriadScore(
-                context_relevance=1.0 if passed else 0.0,
-                faithfulness=None,
-                answer_relevance=1.0 if passed else 0.0,
-                citation_resolvability=1.0,
-            )
+            triad = TriadScore()  # a refusal has no retrieval, claims or citations to score
             return TestCaseResult(
                 test_id=test.id,
                 question_type=test.type,
@@ -146,26 +144,16 @@ class BenchmarkHarness:
                 timings=run_result.timings,
                 blocked=run_result.blocked,
                 attempts=run_result.attempts,
-                contexts=run_result.context_texts,
+                contexts=self._contexts(run_result),
+                reference=test.reference_answer,
             )
 
         # 2. Check for expected out-of-domain abstention or G1 guard refusal
         if test.unanswerable:
-            ans_lower = run_result.final_answer.lower()
-            refused_or_abstained = (
-                run_result.abstention is True
-                or run_result.blocked is True
-                or "cannot find sufficient evidence" in ans_lower
-                or "declined" in ans_lower
-                or "not found" in ans_lower
-            )
-            passed = refused_or_abstained
-            triad = TriadScore(
-                context_relevance=1.0 if passed else 0.0,
-                faithfulness=None,
-                answer_relevance=1.0 if passed else 0.0,
-                citation_resolvability=1.0,
-            )
+            # Structural signals only: free-text substring matches would pass any answer that
+            # happens to contain "not found".
+            passed = run_result.abstention is True or run_result.blocked is True
+            triad = TriadScore()
             return TestCaseResult(
                 test_id=test.id,
                 question_type=test.type,
@@ -178,7 +166,8 @@ class BenchmarkHarness:
                 abstained=run_result.abstention,
                 blocked=run_result.blocked,
                 attempts=run_result.attempts,
-                contexts=run_result.context_texts,
+                contexts=self._contexts(run_result),
+                reference=test.reference_answer,
             )
 
         # 3. Answer Matching
@@ -200,7 +189,10 @@ class BenchmarkHarness:
         faithfulness_score = await self._score_faithfulness(run_result)
 
         # 6. Answer Relevance via Independent Judge (returns None when offline / unjudged)
-        answer_relevance_score = await self._score_answer_relevance(test.question, actual)
+        if run_result.abstention:
+            answer_relevance_score: Optional[float] = 0.0  # an answerable question that was not answered
+        else:
+            answer_relevance_score = await self._score_answer_relevance(test.question, actual)
 
         # 7. Citation Resolvability (100% of cited markers exist in active registry)
         resolvability_score = run_result.resolvability
@@ -210,14 +202,13 @@ class BenchmarkHarness:
         if test.expected_sql and run_result.tool_executions:
             sql_match = self._verify_sql_equivalence(test.expected_sql, run_result)
 
-        # 9. Source Doc Provenance Validation
+        # 9. Source Doc Provenance Validation: composite (multi-document) questions must cite every
+        # required source; single-source questions must cite at least one.
         provenance_match: bool = True
         if test.source_docs:
             cited_files = {c.filename.lower() for c in run_result.citations}
-            provenance_match = any(
-                any(src.lower() in fname for src in test.source_docs)
-                for fname in cited_files
-            )
+            hits = [any(src.lower() in fname for fname in cited_files) for src in test.source_docs]
+            provenance_match = all(hits) if test.type == "composite" else any(hits)
 
         triad = TriadScore(
             context_relevance=context_relevance_score,
@@ -245,8 +236,14 @@ class BenchmarkHarness:
             abstained=run_result.abstention,
             blocked=run_result.blocked,
             attempts=run_result.attempts,
-            contexts=run_result.context_texts,
+            contexts=self._contexts(run_result),
+            reference=test.reference_answer,
         )
+
+    @staticmethod
+    def _contexts(result: AgentRunResult) -> list[str]:
+        """Everything the writer saw: retrieved chunks plus structured/graph tool evidence."""
+        return [*result.context_texts, *result.tool_evidence]
 
     async def _score_faithfulness(self, result: AgentRunResult) -> Optional[float]:
         """Evaluates whether all claims in the generated draft are grounded in cited evidence.
@@ -259,7 +256,7 @@ class BenchmarkHarness:
         if not result.citations:
             return 0.0
         if not self.ws.evaluator:
-            return result.faithfulness
+            return None  # never fall back to the pipeline's own self-score: that is circular
 
         guard = OutputGuard(self.ws.registry, self.ws.evaluator, self.ws.settings.guardrails.citation_excerpt_chars)
         resolved_ids = [c.chunk_id for c in result.citations]
@@ -274,6 +271,8 @@ class BenchmarkHarness:
                 chunk = self.ws.registry.get_chunk(cid)
                 if chunk:
                     evidence_parts.append(chunk.text_content)
+            if not evidence_parts:
+                evidence_parts = list(result.tool_evidence)  # SQL/graph-derived claims carry no chunk id
             payload.append((claim.text, claim.cited_chunk_ids, "\n".join(evidence_parts)))
 
         verdicts = await self.ws.evaluator.verify_claims(payload, self.ws.api_key)
@@ -283,8 +282,6 @@ class BenchmarkHarness:
     async def _score_answer_relevance(self, question: str, answer: str) -> Optional[float]:
         """Asks the independent evaluator if the answer directly answers the query."""
         if not answer:
-            return 0.0
-        if "cannot find sufficient evidence" in answer.lower():
             return 0.0
         if not self.ws.eval_client or not self.ws.eval_model:
             return None
@@ -368,9 +365,9 @@ class BenchmarkHarness:
         accuracy = (passed / total) if total else 0.0
 
         faithfulness_vals = [r.triad.faithfulness for r in results if r.triad.faithfulness is not None]
-        context_rel_vals = [r.triad.context_relevance for r in results if not r.blocked]
+        context_rel_vals = [r.triad.context_relevance for r in results if r.triad.context_relevance is not None]
         ans_rel_vals = [r.triad.answer_relevance for r in results if r.triad.answer_relevance is not None]
-        resolv_vals = [r.triad.citation_resolvability for r in results if not r.blocked]
+        resolv_vals = [r.triad.citation_resolvability for r in results if r.triad.citation_resolvability is not None]
 
         latencies = [r.timings.get("total_ms", 0.0) for r in results if r.timings.get("total_ms")]
         latencies.sort()
@@ -400,4 +397,5 @@ class BenchmarkHarness:
             results=results,
             writer_model=self.ws.writer_label,
             judge_model=self.ws.evaluator_label,
+            pipeline_judge_model=self.ws.pipeline_judge_model,
         )

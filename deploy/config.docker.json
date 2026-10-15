@@ -60,7 +60,11 @@
     "taint_threshold_chunks": 2,
     "tier2_sample_rate": 0.02,
     "max_query_chars": 2000,
-    "citation_excerpt_chars": 2500
+    "citation_excerpt_chars": 2500,
+    "language_min_query_words": 4,
+    "language_min_chunk_words": 20,
+    "language_min_confidence": 0.8,
+    "language_candidates": ["English", "French", "German", "Spanish", "Italian", "Portuguese", "Dutch", "Polish", "Swedish", "Danish", "Bokmal", "Finnish", "Czech", "Romanian", "Turkish", "Indonesian", "Hungarian", "Vietnamese"]
   },
   "decision": {
     "backend": "jev",
@@ -103,6 +107,9 @@
     "ollama_judge_model": "phi3:latest",
     "byok_validation_ttl_seconds": 0,
     "byok_validated_keys_max": 1024
+  },
+  "evaluation": {
+    "judge_model": "google/gemini-2.0-flash-001"
   },
   "logging": {
     "log_full_prompts": false

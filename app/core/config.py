@@ -105,6 +105,14 @@ class GuardrailsConfig(_Strict):
     tier2_sample_rate: float
     max_query_chars: int
     citation_excerpt_chars: int  # evidence excerpt length returned per citation (review-04 C6)
+    # Language ID (outside the model). Texts with fewer alphabetic words are not classified: short
+    # queries and acronym/number-heavy text give unreliable detections.
+    language_min_query_words: int
+    language_min_chunk_words: int
+    language_min_confidence: float  # confidence the TOP language is non-English before it counts
+    # Latin-script candidates only (other scripts are caught by the script check). A closed list
+    # keeps rare/dead languages (Latin, Shona, ...) from absorbing English text with markup or codes.
+    language_candidates: list[str]
 
 
 class LLMJudgeConfig(_Strict):
@@ -178,6 +186,13 @@ class LLMConfig(_Strict):
     byok_validated_keys_max: int
 
 
+class EvaluationConfig(_Strict):
+    # Offline eval judge (harness evaluator and the external Ragas runner). It must differ in model
+    # family from the writer, the pipeline judge and the decision model (NFR-6); the eval entry
+    # points refuse to run otherwise.
+    judge_model: str
+
+
 class LoggingConfig(_Strict):
     log_full_prompts: bool
 
@@ -207,6 +222,7 @@ class Settings(_Strict):
     compliance: ComplianceConfig
     timeouts: TimeoutsConfig
     llm: LLMConfig
+    evaluation: EvaluationConfig
     logging: LoggingConfig
     secrets: SecretsConfig
 

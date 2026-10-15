@@ -26,6 +26,8 @@ from app.core.text import content_tokens, first_match, split_sentences
 from app.ports.decision_backend import DecisionBackendPort
 from app.ports.models import ChunkJudgement, CitationCoordinate, ClaimJudgement, DocumentChunk, GateVerdict, ScanReport
 from app.ports.registry import RegistryPort
+from app.adapters.lingua_detector import LinguaLanguageDetector
+from app.ports.language import LanguageDetectorPort
 from app.verification.injection_patterns import DOCUMENT_INJECTION_PATTERNS, INJECTION_PATTERNS
 
 logger = logging.getLogger("grantloom.services.guardrails")
@@ -64,8 +66,16 @@ def _refusal(template: str, reason: str, confidence: float, backend: str) -> Gat
 class InputGuard:
     """G1 Input Guard: language check, injection prefilter, semantic injection + domain screen."""
 
-    def __init__(self, decision_backend: DecisionBackendPort, guardrails: GuardrailsConfig, decision: DecisionConfig) -> None:
+    def __init__(
+        self,
+        decision_backend: DecisionBackendPort,
+        guardrails: GuardrailsConfig,
+        decision: DecisionConfig,
+        language_detector: Optional[LanguageDetectorPort] = None,
+    ) -> None:
         self.decision_backend = decision_backend
+        self.language_detector = language_detector or LinguaLanguageDetector(guardrails.language_min_confidence, guardrails.language_candidates)
+        self.language_min_words = guardrails.language_min_query_words
         self.max_query_chars = guardrails.max_query_chars
         self.domain_min_confidence = decision.domain_min_confidence
 
@@ -86,6 +96,12 @@ class InputGuard:
         # 2. Canonical injection prefilter (no model call)
         if first_match(INJECTION_PATTERNS, cleaned):
             return _refusal("refusals/prompt_injection.txt", "prompt_injection_detected", 0.99, "regex")
+
+        # 2b. Language ID for Latin-script languages the script check cannot see (no model call).
+        # Asking the model to "answer only in English" is not a control; the detector decides.
+        foreign = self.language_detector.foreign_language(cleaned, self.language_min_words)
+        if foreign:
+            return _refusal("refusals/non_english.txt", "non_english", foreign.confidence, "lingua")
 
         # 3. Semantic screen: paraphrased injections and domain relevance
         screen = await self.decision_backend.screen_query(cleaned, api_key)
@@ -340,8 +356,15 @@ class IngestionScanner:
     tainted chunks exceed guardrails.taint_threshold_chunks.
     """
 
-    def __init__(self, decision_backend: DecisionBackendPort, guardrails: GuardrailsConfig) -> None:
+    def __init__(
+        self,
+        decision_backend: DecisionBackendPort,
+        guardrails: GuardrailsConfig,
+        language_detector: Optional[LanguageDetectorPort] = None,
+    ) -> None:
         self.decision_backend = decision_backend
+        self.language_detector = language_detector or LinguaLanguageDetector(guardrails.language_min_confidence, guardrails.language_candidates)
+        self.language_min_words = guardrails.language_min_chunk_words
         self.taint_threshold = guardrails.taint_threshold_chunks
         self.sample_rate = guardrails.tier2_sample_rate
 
@@ -361,7 +384,20 @@ class IngestionScanner:
                 reasons.append(f"tier1 {c.chunk_id}: '{hit[:60]}'")
 
         flagged_ids = [c.chunk_id for c in flagged]
-        unflagged = [c for c in chunks if c.chunk_id not in set(flagged_ids)]
+        # The Tier 1 patterns are English phrases, so non-English text is invisible to them. Such
+        # chunks cannot be cleared by regex and are always sent to Tier 2 instead.
+        foreign: list[DocumentChunk] = []
+        language_ids: list[str] = []
+        for c in chunks:
+            if c.chunk_id in set(flagged_ids):
+                continue
+            lang = self.language_detector.foreign_language(c.text_content, self.language_min_words)
+            if lang:
+                foreign.append(c)
+                language_ids.append(c.chunk_id)
+                reasons.append(f"language {c.chunk_id}: {lang.language} ({lang.confidence}), Tier 1 cannot screen it")
+
+        unflagged = [c for c in chunks if c.chunk_id not in set(flagged_ids) and c.chunk_id not in set(language_ids)]
         sample_size = math.floor(len(unflagged) * self.sample_rate)
         sample = random.Random(doc_id).sample(unflagged, sample_size) if sample_size else []
 
@@ -373,9 +409,14 @@ class IngestionScanner:
             tainted = flagged_ids
         else:
             try:
-                verdicts = await self.decision_backend.scan_for_injection(flagged + sample, api_key)
+                verdicts = await self.decision_backend.scan_for_injection(flagged + foreign + sample, api_key)
                 tainted = [cid for cid, injected in verdicts.items() if injected]
-                tier2_status = f"completed: {len(flagged) + len(sample)} chunk(s) via {self.decision_backend.name}"
+                tier2_status = (
+                    f"completed: {len(flagged) + len(foreign) + len(sample)} chunk(s) via {self.decision_backend.name}"
+                )
+                for c in foreign:
+                    if c.chunk_id in tainted:
+                        reasons.append(f"tier2 flagged non-English {c.chunk_id}")
                 for cid in flagged_ids:
                     if cid not in tainted:
                         reasons.append(f"tier2 cleared {cid}")
@@ -393,6 +434,7 @@ class IngestionScanner:
             tier1_flagged_chunk_ids=flagged_ids,
             tier2_status=tier2_status,
             reasons=reasons,
+            non_english_chunk_ids=language_ids,
         )
 
 

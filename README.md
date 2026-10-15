@@ -110,7 +110,7 @@ Browser SPA (vanilla JS)  ──HTTP/SSE──▶  FastAPI  (X-API-Key, rate lim
 
 | Gate | What runs |
 |---|---|
-| **G1 input** | Regex prefilter (non-English scripts, canonical injection phrases), followed by native TypeSafe Jev decisions (`noul` questions for prompt injection and domain relevance). |
+| **G1 input** | Regex prefilter (non-English scripts, canonical injection phrases), offline language ID for Latin-script foreign text, followed by native TypeSafe Jev decisions (`noul` questions for prompt injection and domain relevance). |
 | **G2 router** | Native TypeSafe Jev decisions (`choice` across `hybrid`, `keyword`, `structured`, `graph`, `composite`, `semantic`). |
 | **G3 context** | Drops chunks tainted at ingestion, injection-like chunks and irrelevant chunks; reranks by verdict. |
 | **G4 output** | Citation coordinate resolver (physical file, page, sheet, row) + per-claim verification by the judge delegate (`llm_judge`; `grounded` / `contradicted` / `unsupported`). |

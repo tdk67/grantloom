@@ -24,6 +24,7 @@ from app.core.config import Settings
 from app.evaluation.telemetry import PipelineLatencyProfile
 from app.core.errors import GrantLoomError
 from app.core.metrics import REWRITES
+from app.core.untrusted import fence_markers, neutralize, new_fence_id
 from app.core.templates import load_template, render_template
 from app.ports.llm_client import LLMClientPort
 from app.ports.models import CitationCoordinate, DocumentChunk
@@ -77,6 +78,7 @@ class AgentRunResult:
     unverified_claims: list[str] = field(default_factory=list)
     attempts: int = 0
     context_texts: list[str] = field(default_factory=list)
+    tool_evidence: list[str] = field(default_factory=list)
     events: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     timings: dict[str, Any] = field(default_factory=dict)
 
@@ -230,16 +232,19 @@ class WriterAgent:
         blocks = []
         for c in chunks:
             doc = self.registry.get_document(c.doc_id)
-            source = f"{doc.filename} (version {doc.version})" if doc else "unknown"
+            source = neutralize(f"{doc.filename} (version {doc.version})") if doc else "unknown"
             coord = f"Sheet '{c.sheet_name}', Rows {c.row_start}-{c.row_end}" if c.sheet_name else f"Page {c.page_number}"
-            blocks.append(f"[{c.chunk_id}]\nSource: {source}, {coord}\nText: {c.text_content.strip()}")
-        prompt = "Context Documents:\n" + "\n\n".join(blocks)
+            blocks.append(f"[{c.chunk_id}]\nSource: {source}, {coord}\nText: {neutralize(c.text_content.strip())}")
+        # Everything third parties wrote sits inside one fence with a per-request random id; the
+        # system prompt declares fenced text to be data, never instructions.
+        begin, end = fence_markers(new_fence_id())
+        prompt = begin + "\nContext Documents:\n" + "\n\n".join(blocks)
         if tool_evidence:
             prompt += (
                 "\n\nTool Results (computed from the context chunks above; cite the underlying [chunk_id]):\n"
-                + "\n".join(f"- {t}" for t in tool_evidence)
+                + "\n".join(f"- {neutralize(t)}" for t in tool_evidence)
             )
-        prompt += f"\n\nQuestion: {query}\n"
+        prompt += f"\n{end}\n\nQuestion: {neutralize(query)}\n"
         if issues:
             prompt += "\n" + render_template("prompts/writer_rewrite_feedback.txt", issues="\n".join(issues), draft=draft) + "\n"
         valid_ids = ", ".join(f"[{c.chunk_id}]" for c in chunks) if chunks else "none"
@@ -481,6 +486,7 @@ class AgentLoopOrchestrator:
             "attempts": attempt,
             "unverified_claims": [c.claim for c in result.unsupported_claims],
             "context_chunk_ids": context_ids,
+            "tool_evidence": list(outcome.tool_evidence),
             "tool_executions": [e.__dict__ for e in outcome.tool_executions],
             "timings": profile.to_dict(),
         }
@@ -526,6 +532,7 @@ class AgentLoopOrchestrator:
             unverified_claims=done.get("unverified_claims", []),
             attempts=done.get("attempts", 0),
             context_texts=context_texts,
+            tool_evidence=list(done.get("tool_evidence", [])),
             events=events,
             timings=done.get("timings", {}),
         )

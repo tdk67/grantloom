@@ -40,6 +40,31 @@ def format_table(headers: list[str], rows: list[list[str]]) -> str:
     return f"{header_line}\n{sep_line}\n" + "\n".join(data_lines)
 
 
+def _fmt(value: Optional[float]) -> str:
+    return "n/a" if value is None else f"{value:.2f}"
+
+
+def ragas_group(report: BenchmarkReport) -> dict:
+    """One exportable dataset group: samples plus the models that produced them."""
+    return {
+        "scale": report.solicitation_count,
+        "writer_model": report.writer_model.split(":", 1)[-1],
+        "pipeline_judge_model": report.pipeline_judge_model,
+        "dataset": [
+            {
+                "test_id": r.test_id,
+                "question": r.question,
+                "contexts": r.contexts,
+                "answer": r.actual_answer,
+                "ground_truth": r.reference or r.expected,
+                "abstained": r.abstained,
+                "blocked": r.blocked,
+            }
+            for r in report.results
+        ],
+    }
+
+
 def print_report_summary(report: BenchmarkReport) -> None:
     """Displays terminal summary report with Triad scores and latency breakdown."""
     print("\n" + "=" * 90)
@@ -52,16 +77,16 @@ def print_report_summary(report: BenchmarkReport) -> None:
     rows = []
     for r in report.results:
         status = "[PASS]" if r.passed else "[FAIL]"
-        f_score = f"{r.triad.faithfulness:.2f}" if r.triad.faithfulness is not None else "N/A"
-        a_score = f"{r.triad.answer_relevance:.2f}" if r.triad.answer_relevance is not None else "N/A"
+        f_score = _fmt(r.triad.faithfulness)
+        a_score = _fmt(r.triad.answer_relevance)
         rows.append([
             r.test_id[:16],
             r.question_type[:10],
             status,
-            f"{r.triad.context_relevance:.2f}",
+            _fmt(r.triad.context_relevance),
             f_score,
             a_score,
-            f"{r.triad.citation_resolvability:.2f}",
+            _fmt(r.triad.citation_resolvability),
             f"{r.timings.get('total_ms', 0):.0f}",
         ])
     print("\n" + format_table(headers, rows))
@@ -183,21 +208,7 @@ def main() -> None:
         ))
         if args.json_out:
             if args.format == "ragas":
-                data = [
-                    {
-                        "scale": r.solicitation_count,
-                        "dataset": [
-                            {
-                                "question": res.question,
-                                "contexts": res.contexts,
-                                "answer": res.actual_answer,
-                                "ground_truth": res.expected,
-                            }
-                            for res in r.results
-                        ],
-                    }
-                    for r in reports
-                ]
+                data = [ragas_group(r) for r in reports]
             else:
                 data = [{"solicitation_count": r.solicitation_count, "accuracy": r.accuracy_rate, "results": [r.__dict__ for r in r.results]} for r in reports]
             args.json_out.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
@@ -213,15 +224,7 @@ def main() -> None:
         print_report_summary(report)
         if args.json_out:
             if args.format == "ragas":
-                data = [
-                    {
-                        "question": r.question,
-                        "contexts": r.contexts,
-                        "answer": r.actual_answer,
-                        "ground_truth": r.expected,
-                    }
-                    for r in report.results
-                ]
+                data = ragas_group(report)
             else:
                 data = {
                     "solicitation_count": report.solicitation_count,

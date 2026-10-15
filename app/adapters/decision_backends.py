@@ -27,6 +27,7 @@ from app.core.config import DecisionConfig
 from app.core.errors import DecisionBackendError, LLMInferenceError, UpstreamServiceError
 from app.core.metrics import DECISION_RETRIES
 from app.core.templates import load_template, render_template
+from app.core.untrusted import neutralize
 from app.ports.decision_backend import DecisionBackendPort
 from app.ports.llm_client import LLMClientPort
 from app.ports.models import (
@@ -146,8 +147,9 @@ class LLMJudgeDecisionBackend(DecisionBackendPort):
         return True
 
     def _clip(self, text: str) -> str:
+        """Bound the size of untrusted text and strip anything that could close its <untrusted> fence."""
         limit = self.config.llm_judge.max_chunk_chars
-        return text if len(text) <= limit else text[:limit] + " [...]"
+        return neutralize(text if len(text) <= limit else text[:limit] + " [...]")
 
     async def _ask(self, template: str, schema: type[BaseModel], api_key: Optional[str], **values: str) -> Any:
         """One judge call with a bounded retry policy (decision.max_retries attempts total).
@@ -158,7 +160,9 @@ class LLMJudgeDecisionBackend(DecisionBackendPort):
           emit malformed JSON once and a correct verdict on retry.
         The final attempt always raises; there is no fallback backend and no silent degradation.
         """
-        prompt = render_template(f"prompts/{template}", **values)
+        # `query` and `requirement` are rendered inside <untrusted> blocks: they must not be able to close them.
+        safe = {k: (neutralize(v) if k in ("query", "requirement") else v) for k, v in values.items()}
+        prompt = render_template(f"prompts/{template}", **safe)
         max_attempts = self.config.max_retries
         retry_delay = self.config.retry_delay_seconds
 
@@ -242,7 +246,7 @@ class LLMJudgeDecisionBackend(DecisionBackendPort):
         if not claims:
             return []
         blocks = "\n\n".join(
-            f"[K{i}] Claim: {claim}\nEvidence:\n<untrusted>\n{self._clip(evidence) if evidence else '(no evidence cited)'}\n</untrusted>"
+            f"[K{i}] Claim: {neutralize(claim)}\nEvidence:\n<untrusted>\n{self._clip(evidence) if evidence else '(no evidence cited)'}\n</untrusted>"
             for i, (claim, _, evidence) in enumerate(claims, start=1)
         )
         verdict: _G4 = await self._ask("judge_g4_claims.txt", _G4, api_key, claims=blocks)

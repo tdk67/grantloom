@@ -75,7 +75,7 @@ TARGETS = {
     "recall_at_k": 0.85,
 }
 
-CONTEXT_BLOCK_RE = re.compile(r"\[([A-Za-z0-9_\-:]+)\]\nSource: [^\n]*\nText: (.*?)(?=\n\n\[|\n\nTool Results|\n\nQuestion:)", re.S)
+CONTEXT_BLOCK_RE = re.compile(r"\[([A-Za-z0-9_\-:]+)\]\nSource: [^\n]*\nText: (.*?)(?=\n\n\[|\n\nTool Results|\n<<<UNTRUSTED_CONTEXT_[0-9a-f]+ END>>>|\n\nQuestion:)", re.S)
 
 
 class ExtractiveStubWriter(LLMClientPort):
