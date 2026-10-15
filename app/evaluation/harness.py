@@ -79,6 +79,7 @@ class TestCaseResult:
     abstained: bool = False
     blocked: bool = False
     attempts: int = 0
+    contexts: list[str] = field(default_factory=list)
     error: Optional[str] = None
 
 
@@ -145,6 +146,7 @@ class BenchmarkHarness:
                 timings=run_result.timings,
                 blocked=run_result.blocked,
                 attempts=run_result.attempts,
+                contexts=run_result.context_texts,
             )
 
         # 2. Check for expected out-of-domain abstention or G1 guard refusal
@@ -176,6 +178,7 @@ class BenchmarkHarness:
                 abstained=run_result.abstention,
                 blocked=run_result.blocked,
                 attempts=run_result.attempts,
+                contexts=run_result.context_texts,
             )
 
         # 3. Answer Matching
@@ -242,6 +245,7 @@ class BenchmarkHarness:
             abstained=run_result.abstention,
             blocked=run_result.blocked,
             attempts=run_result.attempts,
+            contexts=run_result.context_texts,
         )
 
     async def _score_faithfulness(self, result: AgentRunResult) -> Optional[float]:

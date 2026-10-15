@@ -169,6 +169,7 @@ def main() -> None:
     parser.add_argument("--judge-model", default=None)
     parser.add_argument("--evaluator-model", default=None)
     parser.add_argument("--json-out", type=Path, default=None)
+    parser.add_argument("--format", choices=["grantloom", "ragas"], default="grantloom", help="Output format for --json-out (grantloom or ragas)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.WARNING)
@@ -181,8 +182,26 @@ def main() -> None:
             evaluator_model=args.evaluator_model,
         ))
         if args.json_out:
-            data = [{"solicitation_count": r.solicitation_count, "accuracy": r.accuracy_rate, "results": [r.__dict__ for r in r.results]} for r in reports]
+            if args.format == "ragas":
+                data = [
+                    {
+                        "scale": r.solicitation_count,
+                        "dataset": [
+                            {
+                                "question": res.question,
+                                "contexts": res.contexts,
+                                "answer": res.actual_answer,
+                                "ground_truth": res.expected,
+                            }
+                            for res in r.results
+                        ],
+                    }
+                    for r in reports
+                ]
+            else:
+                data = [{"solicitation_count": r.solicitation_count, "accuracy": r.accuracy_rate, "results": [r.__dict__ for r in r.results]} for r in reports]
             args.json_out.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+            print(f"Benchmark results written to {args.json_out} (format: {args.format})")
     else:
         report = asyncio.run(run_single_benchmark(
             solicitation_count=args.solicitation_count,
@@ -193,13 +212,25 @@ def main() -> None:
         ))
         print_report_summary(report)
         if args.json_out:
-            data = {
-                "solicitation_count": report.solicitation_count,
-                "accuracy": report.accuracy_rate,
-                "latencies": report.stage_latencies_ms,
-                "results": [r.__dict__ for r in report.results],
-            }
+            if args.format == "ragas":
+                data = [
+                    {
+                        "question": r.question,
+                        "contexts": r.contexts,
+                        "answer": r.actual_answer,
+                        "ground_truth": r.expected,
+                    }
+                    for r in report.results
+                ]
+            else:
+                data = {
+                    "solicitation_count": report.solicitation_count,
+                    "accuracy": report.accuracy_rate,
+                    "latencies": report.stage_latencies_ms,
+                    "results": [r.__dict__ for r in report.results],
+                }
             args.json_out.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+            print(f"Benchmark results written to {args.json_out} (format: {args.format})")
 
 
 if __name__ == "__main__":
