@@ -638,6 +638,32 @@ body {
 .confidence-mid { background: rgba(245, 158, 11, 0.2); color: #fbbf24; }
 .confidence-low { background: rgba(239, 68, 68, 0.2); color: #f87171; }
 
+/* Review-08 F2: per-claim verdict reasons from G4 (why the answer has this confidence) */
+.verdict-reasons {
+  margin-top: 4px;
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent-teal);
+  background: rgba(20, 184, 166, 0.06);
+  border-radius: 0 6px 6px 0;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+}
+.verdict-reasons .verdict-title {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.verdict-reasons ul {
+  margin: 0;
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
 /* Clickable Citation Badges */
 .citation-badge {
   display: inline-block;

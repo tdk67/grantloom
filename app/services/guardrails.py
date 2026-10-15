@@ -227,6 +227,7 @@ class VerificationResult:
     resolvability: float
     faithfulness: float
     backend: str
+    confidence_reasons: list[str] = field(default_factory=list)
 
     @property
     def unsupported_claims(self) -> list[ClaimJudgement]:
@@ -334,6 +335,9 @@ class OutputGuard:
         grounded = sum(1 for j in judgements if j.verdict == "grounded")
         faithfulness = grounded / len(judgements) if judgements else 0.0
         backend = judgements[0].backend if judgements else self.decision_backend.name
+        # Review-08 (F2): carry the per-claim verdict reasons so the UI can explain WHY a draft
+        # was not accepted (which claims were unsupported / contradicted and what the judge said).
+        confidence_reasons = [f"{j.verdict.upper()} \u2014 {j.reason}" for j in judgements]
         GUARD_VERDICTS.labels(gate="G4", outcome="pass" if (citations and grounded == len(judgements) and not unresolved) else "fail", backend=backend).inc()
         return VerificationResult(
             cleaned_text=cleaned_text,
@@ -343,6 +347,7 @@ class OutputGuard:
             resolvability=round(resolvability, 3),
             faithfulness=round(faithfulness, 3),
             backend=backend,
+            confidence_reasons=confidence_reasons,
         )
 
 
