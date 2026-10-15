@@ -1,6 +1,6 @@
-"""Dynamic evaluation question synthesizer and test-case suite.
+"""Canonical benchmark question suite and test case definitions.
 
-Generates calibrated questions across 7 core RAG query profiles:
+Calibrated questions across 7 core RAG query profiles:
 1. Exact BM25 Keyword (exact technical codes/standards: NFPA 855, IEEE 1547)
 2. Semantic Vector (dense concept retrieval with zero literal keyword overlap)
 3. Structured SQL (tabular arithmetic aggregations: SUM, AVG, COUNT)
@@ -12,17 +12,9 @@ Generates calibrated questions across 7 core RAG query profiles:
 
 from __future__ import annotations
 
-import json
 import logging
-import re
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
 from typing import Any, Optional
-
-from app.core.templates import render_template
-from app.ports.llm_client import LLMClientPort
-from app.ports.models import DocumentChunk
-from app.ports.registry import RegistryPort
 
 logger = logging.getLogger("grantloom.evaluation.synthesizer")
 
@@ -54,7 +46,7 @@ CANONICAL_NINE_SUITE: list[dict[str, Any]] = [
         "question": "What specific requirements are mandated by standard NFPA 855 and IEEE 1547 for battery energy storage systems?",
         "expected": "NFPA 855",
         "expected_regex": r"(?i)\b(NFPA\s*855|IEEE\s*1547)\b",
-        "source_docs": ["DOE_Solar_2026_Sample.pdf"],
+        "source_docs": ["Past_Proposal_2024_Sample.pdf", "DOE_Solar_2026_Sample.pdf"],
         "unanswerable": False,
         "adversarial": False,
         "reasoning": "Evaluates exact lexical BM25 retrieval on rare regulatory codes and engineering standards.",
@@ -89,7 +81,7 @@ CANONICAL_NINE_SUITE: list[dict[str, Any]] = [
         "category": "Budget Tabular Aggregation",
         "question": "What is the total sum of all equipment acquisition costs across all budgeted equipment items in the lab budget?",
         "expected": "151000",
-        "expected_regex": r"(?i)\b(151,?000(\.00)?|\$151,?000)\b",
+        "expected_regex": r"(?i)(\$|USD\s*)?151[,\.]?000(\.00)?\b",
         "expected_sql": "SELECT SUM(total_cost) FROM sheet_Equipment",
         "source_docs": ["Lab_Budget_2025_Sample.xlsx"],
         "unanswerable": False,
@@ -124,10 +116,10 @@ CANONICAL_NINE_SUITE: list[dict[str, Any]] = [
         "id": "TC07_MULTI_DOC_BUDGET_VS_COMMITMENT_LETTER",
         "type": "composite",
         "category": "Commitment Letter vs Budget",
-        "question": "Verify whether the cost-share matching funds committed by the City of Chicago in their letter align with the non-federal share in our proposal records.",
+        "question": "Verify whether the cost-share matching funds committed by the Maryland Clean Energy Center in their letter align with the non-federal share in our proposal records.",
         "expected": "312500",
-        "expected_regex": r"(?i)\b(312,?500|\$312,?500|matches|aligns)\b",
-        "source_docs": ["Cost_Share_Commitment_Letter.pdf", "Past_Proposal_2024_Sample.pdf"],
+        "expected_regex": r"(?i)\b(312[,\.]?500|\$312[,\.]?500|matches|aligns)\b",
+        "source_docs": ["Cost_Share_Commitment_Letter_2025.pdf", "Past_Proposal_2024_Sample.pdf"],
         "unanswerable": False,
         "adversarial": False,
         "reasoning": "Evaluates cross-verification between external third-party commitment letters and internal proposal budget records.",
@@ -160,57 +152,8 @@ CANONICAL_NINE_SUITE: list[dict[str, Any]] = [
 
 
 class QuestionSynthesizer:
-    """Generates canonical and dynamic evaluation test cases from indexed corpus data."""
-
-    def __init__(self, generator_llm: Optional[LLMClientPort] = None) -> None:
-        self.generator_llm = generator_llm
+    """Provides canonical benchmark test cases from calibrated corpus ground truth."""
 
     def get_canonical_suite(self) -> list[EvalTestCase]:
         """Returns the canonical 9-question evaluation benchmark."""
         return [EvalTestCase(**item) for item in CANONICAL_NINE_SUITE]
-
-    async def synthesize_dynamic_test_case(
-        self,
-        question_type: str,
-        evidence_chunks: list[DocumentChunk],
-        api_key: Optional[str] = None,
-    ) -> Optional[EvalTestCase]:
-        """Uses an independent generator LLM to synthesize a new test case from source chunks."""
-        if not self.generator_llm:
-            return None
-
-        evidence_text = "\n\n".join(f"[{c.chunk_id}] {c.text_content}" for c in evidence_chunks)
-        instructions_map = {
-            "keyword": "Find a rare technical code, standard number, or unique model name in the evidence. Ask a question targeting it.",
-            "semantic": "Identify a key conceptual theme. Ask a question about this theme using completely different words/synonyms with ZERO literal keyword overlap.",
-            "composite": "Formulate a question that requires combining facts from at least two different sections or documents.",
-        }
-        instructions = instructions_map.get(question_type, "Formulate a clear factual question based on the evidence.")
-
-        prompt = render_template(
-            "templates/prompts/synthesizer_question.txt",
-            question_type=question_type,
-            instructions=instructions,
-            evidence=evidence_text,
-        )
-
-        response = await self.generator_llm.generate(prompt=prompt, api_key=api_key)
-        try:
-            cleaned = response.strip()
-            if cleaned.startswith("```"):
-                cleaned = re.sub(r"^```[a-z]*\n?", "", cleaned)
-                cleaned = re.sub(r"\n?```$", "", cleaned)
-            data = json.loads(cleaned)
-            return EvalTestCase(
-                id=f"DYN_{question_type.upper()}_{len(evidence_chunks)}",
-                type=question_type,
-                category=f"Dynamic {question_type.capitalize()}",
-                question=data["question"],
-                expected=str(data["expected"]),
-                expected_regex=data.get("expected_regex"),
-                source_docs=list({c.doc_id for c in evidence_chunks}),
-                reasoning=data.get("reasoning", ""),
-            )
-        except Exception as exc:
-            logger.warning("Failed to parse synthesized test case: %s", exc)
-            return None

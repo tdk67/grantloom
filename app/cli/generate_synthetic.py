@@ -38,7 +38,7 @@ def main():
     args = parse_args()
     if args.output_dir is None:
         args.output_dir = Path(get_settings().database.synthetic_path)
-    print(f"=== GrantLoom Synthetic Data Generator ===")
+    print("=== GrantLoom Synthetic Data Generator ===")
     print(f"Destination: {args.output_dir.resolve()}")
     print(f"Solicitation pipeline count: {args.solicitations}")
 

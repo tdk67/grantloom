@@ -2,16 +2,8 @@
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
-from typing import Any, Optional
-
-
-@dataclass
-class StepTiming:
-    step_name: str
-    duration_ms: float
-    metadata: dict[str, Any] = field(default_factory=dict)
+from typing import Any
 
 
 @dataclass
@@ -43,18 +35,3 @@ class PipelineLatencyProfile:
             "tokens_per_second": round(self.tokens_per_second, 1),
             "token_count": self.token_count,
         }
-
-
-class StageTimer:
-    """Context manager to measure milliseconds of a pipeline stage."""
-
-    def __init__(self) -> None:
-        self.start_time: float = 0.0
-        self.elapsed_ms: float = 0.0
-
-    def __enter__(self) -> "StageTimer":
-        self.start_time = time.perf_counter()
-        return self
-
-    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        self.elapsed_ms = (time.perf_counter() - self.start_time) * 1000.0

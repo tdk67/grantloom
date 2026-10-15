@@ -66,6 +66,8 @@ class ModelsConfig(_Strict):
     embedding_backend: Literal["deterministic", "openrouter"]
     embedding_model: str
     embedding_dimension: int
+    max_tokens: int = 350
+
 
 
 class RetrievalConfig(_Strict):

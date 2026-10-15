@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Optional
 
 from app.adapters.chroma_adapter import ChromaVectorStoreAdapter
-from app.adapters.decision_backends import LLMJudgeDecisionBackend
+from app.adapters.decision_backends import JevDecisionBackend, LLMJudgeDecisionBackend
 from app.adapters.kuzu_adapter import KuzuGraphStoreAdapter
 from app.adapters.ollama_client import OllamaClientAdapter
 from app.adapters.openrouter_client import OpenRouterClientAdapter
@@ -205,6 +205,7 @@ async def build_eval_run(
             base_url=settings.llm.openrouter_base_url,
             timeout_seconds=settings.timeouts.openrouter_seconds,
             log_full_prompts=settings.logging.log_full_prompts,
+            default_max_tokens=settings.models.max_tokens,
         )
         await client.validate_api_key(api_key)
         writer_model = writer_model or settings.models.writer_model
@@ -226,6 +227,7 @@ async def build_eval_run(
 
     migrator.upgrade("head", db_url=f"sqlite:///{Path(settings.database.sqlite_path).as_posix()}")
     registry = SqliteRegistryAdapter(settings.database.sqlite_path)
+    base_judge = LLMJudgeDecisionBackend(client, judge_model, settings.decision) if client else None
     if decision_backend_factory is not None:
         decision_backend = decision_backend_factory(registry)
         decision_label = f"injected:{decision_backend.name}"
@@ -235,15 +237,24 @@ async def build_eval_run(
         )
     elif decision == "jev":
         jev = settings.decision.jev_model
-        decision_backend = LLMJudgeDecisionBackend(client, jev, settings.decision, label=f"jev:{jev}")
+        decision_backend = JevDecisionBackend(
+            api_key=api_key or "",
+            model=jev,
+            base_url=settings.decision.jev_base_url,
+            timeout_seconds=settings.timeouts.openrouter_seconds,
+            config=settings.decision,
+        )
         decision_label = f"jev {provider}:{jev}"
     else:
-        decision_backend = LLMJudgeDecisionBackend(client, judge_model, settings.decision)
+        decision_backend = base_judge
         decision_label = f"llm_judge {provider}:{judge_model}"
 
     evaluator: Optional[DecisionBackendPort] = None
     evaluator_label = "not run"
-    if writer in ("openrouter", "ollama"):
+    if decision == "jev":
+        evaluator = decision_backend
+        evaluator_label = f"jev:{settings.decision.jev_model}"
+    elif writer in ("openrouter", "ollama"):
         evaluator = LLMJudgeDecisionBackend(client, judge_model, settings.decision)
         evaluator_label = f"independent judge {provider}:{judge_model}"
 

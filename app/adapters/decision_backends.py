@@ -389,17 +389,37 @@ class JevDecisionBackend(DecisionBackendPort):
             "state": state,
             "questions": questions,
         }
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                resp = await client.post(self.base_url, headers=headers, json=payload)
-        except Exception as exc:
-            raise DecisionBackendError(f"Jev Decisions API network error: {exc}") from exc
+        max_attempts = self.config.max_retries
+        retry_delay = self.config.retry_delay_seconds
 
-        if resp.status_code != 200:
-            raise DecisionBackendError(f"Jev Decisions API failed ({resp.status_code}): {resp.text}")
-
-        data = resp.json()
-        return data.get("answers", {})
+        for attempt in range(1, max_attempts + 1):
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                    resp = await client.post(self.base_url, headers=headers, json=payload)
+                if resp.status_code != 200:
+                    raise UpstreamServiceError(f"Jev Decisions API failed ({resp.status_code}): {resp.text}")
+                data = resp.json()
+                if not isinstance(data, dict) or "answers" not in data:
+                    raise DecisionBackendError(f"Jev Decisions API returned invalid payload: {data}")
+                return data["answers"]
+            except (httpx.HTTPError, UpstreamServiceError, DecisionBackendError) as exc:
+                kind = "invalid_verdict" if isinstance(exc, DecisionBackendError) else "upstream_failure"
+                DECISION_RETRIES.labels(kind=kind).inc()
+                if attempt >= max_attempts:
+                    logger.error(
+                        "Jev Decisions API call failed after %d attempts (%s): %s",
+                        max_attempts, kind, exc,
+                    )
+                    raise DecisionBackendError(
+                        f"Jev Decisions backend '{self.name}' failed after {max_attempts} attempts ({kind.replace('_', ' ')}): {exc}"
+                    ) from exc
+                delay = retry_delay * (2 ** (attempt - 1))
+                logger.warning(
+                    "Jev Decisions API call hit %s (attempt %d/%d): %s; retrying in %.1fs...",
+                    kind, attempt, max_attempts, exc, delay,
+                )
+                await asyncio.sleep(delay)
+        raise AssertionError("unreachable: the retry loop always returns or raises")
 
     async def screen_query(self, query: str, api_key: Optional[str] = None) -> GateVerdict:
         questions = {
@@ -420,24 +440,33 @@ class JevDecisionBackend(DecisionBackendPort):
                 },
             },
         }
+        answers = await self._post_decisions({"query": query}, questions, api_key)
+        if not isinstance(answers, dict):
+            raise DecisionBackendError(f"Jev Decisions API returned non-dict answers: {answers}")
+        manip_info = answers.get("manipulation")
+        if not isinstance(manip_info, dict) or "noul" not in manip_info:
+            raise DecisionBackendError(f"Jev Decisions response missing 'manipulation.noul': {answers}")
+        topic_info = answers.get("on_topic")
+        if not isinstance(topic_info, dict) or "noul" not in topic_info:
+            raise DecisionBackendError(f"Jev Decisions response missing 'on_topic.noul': {answers}")
+
         try:
-            answers = await self._post_decisions({"query": query}, questions, api_key)
-            manip_p = answers.get("manipulation", {}).get("noul", 0.0)
-            topic_p = answers.get("on_topic", {}).get("noul", 1.0)
-            is_manip = manip_p >= self.config.injection_probability_threshold
-            is_topic = topic_p >= self.config.domain_min_confidence
-            confidence = max(manip_p if is_manip else (1.0 - manip_p), topic_p if is_topic else (1.0 - topic_p))
-            passed = not is_manip and is_topic
-            return GateVerdict(
-                gate_id="G1",
-                passed=passed,
-                confidence=round(confidence, 2),
-                reason="input_guard_passed" if passed else ("prompt_injection_detected" if is_manip else "out_of_domain"),
-                metadata={"injection": is_manip, "in_domain": is_topic, "backend": self.name},
-            )
-        except Exception as exc:
-            logger.warning("Jev screen_query failed, falling back to judge delegate: %s", exc)
-            return await self.judge_delegate.screen_query(query, api_key)
+            manip_p = float(manip_info["noul"])
+            topic_p = float(topic_info["noul"])
+        except (ValueError, TypeError) as exc:
+            raise DecisionBackendError(f"Jev Decisions returned non-numeric noul value: {exc}") from exc
+
+        is_manip = manip_p >= self.config.injection_probability_threshold
+        is_topic = topic_p >= self.config.domain_min_confidence
+        confidence = max(manip_p if is_manip else (1.0 - manip_p), topic_p if is_topic else (1.0 - topic_p))
+        passed = not is_manip and is_topic
+        return GateVerdict(
+            gate_id="G1",
+            passed=passed,
+            confidence=round(confidence, 2),
+            reason="input_guard_passed" if passed else ("prompt_injection_detected" if is_manip else "out_of_domain"),
+            metadata={"injection": is_manip, "in_domain": is_topic, "backend": self.name},
+        )
 
     async def route_query(
         self, query: str, available_strategies: Sequence[str], api_key: Optional[str] = None
@@ -457,23 +486,28 @@ class JevDecisionBackend(DecisionBackendPort):
                 "criteria": {s: strat_criteria.get(s, f"Strategy for {s}") for s in available_strategies},
             }
         }
-        try:
-            answers = await self._post_decisions({"query": query}, questions, api_key)
-            strat_info = answers.get("strategy", {})
-            choice = strat_info.get("choice", "hybrid")
-            if choice not in available_strategies:
-                choice = "hybrid"
-            conf = float(strat_info.get("confidence", 0.95))
-            return GateVerdict(
-                gate_id="G2",
-                passed=True,
-                confidence=round(conf, 2),
-                reason=f"jev_choice_{choice}",
-                metadata={"strategy": choice, "backend": self.name},
+        answers = await self._post_decisions({"query": query}, questions, api_key)
+        if not isinstance(answers, dict):
+            raise DecisionBackendError(f"Jev Decisions API returned non-dict answers: {answers}")
+        strat_info = answers.get("strategy")
+        if not isinstance(strat_info, dict) or "choice" not in strat_info:
+            raise DecisionBackendError(f"Jev Decisions response missing 'strategy.choice': {answers}")
+        choice = strat_info["choice"]
+        if choice not in available_strategies:
+            raise DecisionBackendError(
+                f"Jev Decisions returned strategy '{choice}' not in available strategies: {list(available_strategies)}"
             )
-        except Exception as exc:
-            logger.warning("Jev route_query failed, falling back to judge delegate: %s", exc)
-            return await self.judge_delegate.route_query(query, available_strategies, api_key)
+        try:
+            conf = float(strat_info.get("confidence", 0.95))
+        except (ValueError, TypeError):
+            conf = 0.95
+        return GateVerdict(
+            gate_id="G2",
+            passed=True,
+            confidence=round(conf, 2),
+            reason=f"jev_choice_{choice}",
+            metadata={"strategy": choice, "backend": self.name},
+        )
 
     async def verify_claims(
         self, claims: Sequence[tuple[str, Sequence[str], str]], api_key: Optional[str] = None
@@ -492,27 +526,28 @@ class JevDecisionBackend(DecisionBackendPort):
                 },
             }
         all_evidence = "\n\n".join(f"[Evidence {i}]: {ev}" for i, (_, _, ev) in enumerate(claims, start=1) if ev)
-        try:
-            answers = await self._post_decisions({"evidence": all_evidence or "no evidence cited"}, questions, api_key)
-            judgements = []
-            for i, (claim_text, cited, _) in enumerate(claims, start=1):
-                ans = answers.get(f"claim_{i}", {})
-                verdict = ans.get("choice", "grounded")
-                if verdict not in ("grounded", "contradicted", "unsupported"):
-                    verdict = "grounded"
-                judgements.append(
-                    ClaimJudgement(
-                        claim=claim_text,
-                        cited_chunk_ids=list(cited),
-                        verdict=verdict,
-                        reason=f"jev_{verdict}",
-                        backend=self.name,
-                    )
+        answers = await self._post_decisions({"evidence": all_evidence or "no evidence cited"}, questions, api_key)
+        if not isinstance(answers, dict):
+            raise DecisionBackendError(f"Jev Decisions API returned non-dict answers: {answers}")
+        judgements = []
+        for i, (claim_text, cited, _) in enumerate(claims, start=1):
+            key = f"claim_{i}"
+            ans = answers.get(key)
+            if not isinstance(ans, dict) or "choice" not in ans:
+                raise DecisionBackendError(f"Jev Decisions response missing '{key}.choice': {answers}")
+            verdict = ans["choice"]
+            if verdict not in ("grounded", "contradicted", "unsupported"):
+                raise DecisionBackendError(f"Jev Decisions returned invalid verdict '{verdict}' for {key}")
+            judgements.append(
+                ClaimJudgement(
+                    claim=claim_text,
+                    cited_chunk_ids=list(cited),
+                    verdict=verdict,
+                    reason=f"jev_{verdict}",
+                    backend=self.name,
                 )
-            return judgements
-        except Exception as exc:
-            logger.warning("Jev verify_claims failed, falling back to judge delegate: %s", exc)
-            return await self.judge_delegate.verify_claims(claims, api_key)
+            )
+        return judgements
 
     async def judge_chunks(
         self, query: str, chunks: Sequence[DocumentChunk], api_key: Optional[str] = None

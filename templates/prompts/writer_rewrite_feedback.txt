@@ -1,3 +1,12 @@
-[VALIDATOR FEEDBACK] Your previous draft failed verification:
+[VALIDATOR FEEDBACK]
+Previous Draft:
+<<DRAFT>>
+
+The draft failed verification due to the following issues:
 <<ISSUES>>
-Rewrite the answer. Ground every claim in the context documents and cite each with its exact [chunk_id]. Do not cite filenames or sheet names. Drop any claim the context does not support.
+
+Instructions for Rewrite:
+1. Rewrite the answer concisely (1 to 3 direct sentences).
+2. Every stated fact MUST be grounded directly in the context documents and cite its exact [chunk_id].
+3. If an issue above notes an UNSUPPORTED or CONTRADICTED claim, completely drop or correct that claim.
+4. If the context does not contain the answer, state: "This information was not found in the indexed documents".

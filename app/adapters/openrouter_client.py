@@ -27,10 +27,12 @@ class OpenRouterClientAdapter(LLMClientPort):
         base_url: str,
         timeout_seconds: float,
         log_full_prompts: bool,
+        default_max_tokens: int = 350,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout_seconds
         self.log_full_prompts = log_full_prompts
+        self.default_max_tokens = default_max_tokens
 
     @property
     def provider(self) -> str:
@@ -205,6 +207,7 @@ class OpenRouterClientAdapter(LLMClientPort):
             "messages": messages,
             "temperature": temperature,
             "stream": True,
+            "max_tokens": self.default_max_tokens,
         }
 
         try:

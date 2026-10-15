@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 from app.adapters.decision_backends import JevDecisionBackend, LLMJudgeDecisionBackend
 from app.core.config import get_settings
-from app.ports.models import ClaimJudgement, DocumentChunk, GateVerdict
+from app.core.errors import DecisionBackendError
 
 
 @pytest.fixture
@@ -107,12 +107,72 @@ async def test_jev_verify_claims(jev_backend):
 
 
 @pytest.mark.asyncio
-async def test_jev_fallback_to_delegate_on_failure(jev_backend):
+async def test_jev_failure_raises_loudly(jev_backend):
+    """A1 regression: Jev failures must raise DecisionBackendError and never silently fall back to judge delegate."""
     backend, delegate = jev_backend
-    delegate.screen_query.return_value = GateVerdict(
-        gate_id="G1", passed=True, confidence=0.88, reason="delegate_passed", metadata={}
-    )
-    with patch.object(backend, "_post_decisions", side_effect=RuntimeError("API timeout")):
-        verdict = await backend.screen_query("Some query")
-        assert verdict.reason == "delegate_passed"
-        delegate.screen_query.assert_called_once_with("Some query", None)
+    with patch.object(backend, "_post_decisions", side_effect=DecisionBackendError("API error")):
+        with pytest.raises(DecisionBackendError):
+            await backend.screen_query("Some query")
+        delegate.screen_query.assert_not_called()
+
+        with pytest.raises(DecisionBackendError):
+            await backend.route_query("Some query", ["hybrid", "keyword"])
+        delegate.route_query.assert_not_called()
+
+        with pytest.raises(DecisionBackendError):
+            await backend.verify_claims([("claim", ["c1"], "ev")])
+        delegate.verify_claims.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_jev_strict_parsing_rejects_missing_keys(jev_backend):
+    """A1 regression: missing noul or choice keys must raise DecisionBackendError rather than failing open."""
+    backend, _ = jev_backend
+
+    # G1 missing noul
+    with patch.object(backend, "_post_decisions", return_value={"manipulation": {}}):
+        with pytest.raises(DecisionBackendError, match="missing 'manipulation.noul'"):
+            await backend.screen_query("Some query")
+
+    # G2 missing choice or unavailable strategy
+    with patch.object(backend, "_post_decisions", return_value={"strategy": {}}):
+        with pytest.raises(DecisionBackendError, match="missing 'strategy.choice'"):
+            await backend.route_query("Some query", ["hybrid", "keyword"])
+
+    with patch.object(backend, "_post_decisions", return_value={"strategy": {"choice": "quantum_leap"}}):
+        with pytest.raises(DecisionBackendError, match="not in available strategies"):
+            await backend.route_query("Some query", ["hybrid", "keyword"])
+
+    # G4 missing or invalid choice
+    with patch.object(backend, "_post_decisions", return_value={"claim_1": {"choice": "somewhat_true"}}):
+        with pytest.raises(DecisionBackendError, match="invalid verdict"):
+            await backend.verify_claims([("claim", ["c1"], "ev")])
+
+
+@pytest.mark.asyncio
+async def test_jev_contract_parsing_real_payload(jev_backend):
+    """Contract test exercising _post_decisions HTTP parsing with realistic OpenRouter Decisions payload."""
+    import httpx
+    backend, _ = jev_backend
+
+    real_decisions_json = {
+        "id": "dec_12345",
+        "model": "typesafe/jev-1.13",
+        "answers": {
+            "strategy": {
+                "choice": "structured",
+                "probabilities": {"structured": 0.94, "hybrid": 0.04, "keyword": 0.02},
+                "confidence": 0.94,
+            }
+        },
+    }
+
+    mock_resp = httpx.Response(status_code=200, json=real_decisions_json, request=httpx.Request("POST", backend.base_url))
+    with patch("httpx.AsyncClient.post", return_value=mock_resp):
+        verdict = await backend.route_query(
+            "What is the total sum of all equipment costs?",
+            ["hybrid", "keyword", "structured", "graph", "composite"],
+        )
+        assert verdict.passed is True
+        assert verdict.metadata["strategy"] == "structured"
+        assert verdict.confidence == 0.94

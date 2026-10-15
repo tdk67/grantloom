@@ -135,6 +135,7 @@ def build_inference_profile(settings: Settings) -> InferenceProfile:
         base_url=settings.llm.openrouter_base_url,
         timeout_seconds=settings.timeouts.openrouter_seconds,
         log_full_prompts=settings.logging.log_full_prompts,
+        default_max_tokens=settings.models.max_tokens,
     )
     return InferenceProfile(
         mode="byok",
@@ -169,6 +170,7 @@ def build_decision_backend(
     settings: Settings,
     profile: InferenceProfile,
     corpus_overlap: Optional[Callable[[str], float]] = None,
+    api_key: Optional[str] = None,
 ) -> DecisionBackendPort:
     """Build the configured decision backend. Only `llm_judge` and `jev` exist (D31); both are the
     same prompt-based judge pointed at a different model. A failed judge raises — no heuristic
@@ -176,9 +178,9 @@ def build_decision_backend(
     cfg = settings.decision
     base_judge = LLMJudgeDecisionBackend(profile.client, profile.judge_model, cfg)
     if cfg.backend == "jev":
-        api_key = settings.secrets.openrouter_api_key or ""
+        key = api_key or settings.secrets.openrouter_api_key or ""
         judge: DecisionBackendPort = JevDecisionBackend(
-            api_key=api_key,
+            api_key=key,
             model=cfg.jev_model,
             base_url=cfg.jev_base_url,
             timeout_seconds=settings.timeouts.openrouter_seconds,

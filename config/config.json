@@ -27,7 +27,8 @@
     "judge_model": "openai/gpt-4o-mini",
     "embedding_backend": "openrouter",
     "embedding_model": "openai/text-embedding-3-small",
-    "embedding_dimension": 1536
+    "embedding_dimension": 1536,
+    "max_tokens": 350
   },
   "retrieval": {
     "dense_top_k": 10,

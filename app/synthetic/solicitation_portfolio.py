@@ -32,25 +32,25 @@ SOLICITATION_CATALOG = [
         "pages": 25,
     },
     {
-        "doc_id": "DE-FOA-0003412",
-        "filename": "DOE_Clean_Hydrogen_2026.pdf",
-        "title": "DE-FOA-0003412: Clean Hydrogen Electrolysis & Underground Storage Infrastructure",
-        "subtitle": "U.S. Department of Energy | Hydrogen & Fuel Cell Technologies Office (HFTO)",
-        "agency": "U.S. Department of Energy (DOE)",
-        "cfda": "81.086",
-        "date": "2026-09-15",
-        "pool": "$30,000,000",
-        "awards": "8 to 12 awards",
-        "ceiling": "$4,000,000",
-        "floor": "$1,000,000",
-        "cost_share": "20.0%",
-        "cost_share_desc": "20.0% non-federal matching requirement for research and development.",
-        "equipment_threshold": "$50,000",
-        "pi_req": "Demonstrated expertise in electrochemical energy conversion, membrane electrode assemblies, or gas storage.",
-        "page_limit": 20,
-        "deadline": "December 1, 2026, at 5:00 PM Eastern Time",
-        "standards": "ASME B31.12 Hydrogen Piping and Pipelines, NFPA 2 Hydrogen Technologies Code",
-        "pages": 18,
+        "doc_id": "EPA-R-OAR-26-02",
+        "filename": "EPA_Resilience_2026_Sample.pdf",
+        "title": "EPA Community Resilience NOFO: Environmental Justice & Clean Power",
+        "subtitle": "U.S. Environmental Protection Agency | Office of Air and Radiation",
+        "agency": "U.S. Environmental Protection Agency (EPA)",
+        "cfda": "66.034",
+        "date": "2026-08-18",
+        "pool": "$15,000,000",
+        "awards": "10 to 15 awards",
+        "ceiling": "$1,500,000",
+        "floor": "$300,000",
+        "cost_share": "0.0%",
+        "cost_share_desc": "Mandatory cost share is 0.0%. Non-federal matching is voluntary and not used in merit ranking.",
+        "equipment_threshold": "$25,000",
+        "pi_req": "Partnership with community-based environmental justice organizations in disadvantaged census tracts.",
+        "page_limit": 16,
+        "deadline": "January 28, 2027, at 11:59 PM Eastern Time",
+        "standards": "EPA Quality Assurance Project Plan (QAPP) requirements, Clean Air Act Section 103",
+        "pages": 16,
     },
     {
         "doc_id": "DE-FOA-0003550",
@@ -389,25 +389,25 @@ SOLICITATION_CATALOG = [
         "pages": 18,
     },
     {
-        "doc_id": "EPA-R-OAR-26-02",
-        "filename": "EPA_Clean_Air_2026.pdf",
-        "title": "EPA-R-OAR-26-02: Environmental Justice Community Air Quality Micro-Sensors & Clean Power",
-        "subtitle": "U.S. Environmental Protection Agency | Office of Air and Radiation",
-        "agency": "U.S. Environmental Protection Agency (EPA)",
-        "cfda": "66.034",
-        "date": "2026-08-18",
-        "pool": "$15,000,000",
-        "awards": "10 to 15 awards",
-        "ceiling": "$1,500,000",
-        "floor": "$300,000",
-        "cost_share": "0.0%",
-        "cost_share_desc": "Non-federal matching is voluntary and not used in merit ranking.",
-        "equipment_threshold": "$25,000",
-        "pi_req": "Partnership with community-based environmental justice organizations in disadvantaged census tracts.",
-        "page_limit": 16,
-        "deadline": "January 28, 2027, at 11:59 PM Eastern Time",
-        "standards": "EPA Quality Assurance Project Plan (QAPP) requirements, Clean Air Act Section 103",
-        "pages": 16,
+        "doc_id": "DE-FOA-0003412",
+        "filename": "DOE_Clean_Hydrogen_2026.pdf",
+        "title": "DE-FOA-0003412: Clean Hydrogen Electrolysis & Underground Storage Infrastructure",
+        "subtitle": "U.S. Department of Energy | Hydrogen & Fuel Cell Technologies Office (HFTO)",
+        "agency": "U.S. Department of Energy (DOE)",
+        "cfda": "81.086",
+        "date": "2026-09-15",
+        "pool": "$30,000,000",
+        "awards": "8 to 12 awards",
+        "ceiling": "$4,000,000",
+        "floor": "$1,000,000",
+        "cost_share": "20.0%",
+        "cost_share_desc": "20.0% non-federal matching requirement for research and development.",
+        "equipment_threshold": "$50,000",
+        "pi_req": "Demonstrated expertise in electrochemical energy conversion, membrane electrode assemblies, or gas storage.",
+        "page_limit": 20,
+        "deadline": "December 1, 2026, at 5:00 PM Eastern Time",
+        "standards": "ASME B31.12 Hydrogen Piping and Pipelines, NFPA 2 Hydrogen Technologies Code",
+        "pages": 18,
     },
     {
         "doc_id": "DE-FOA-0003820",
@@ -446,15 +446,15 @@ def build_solicitation_from_item(cfg: dict) -> DocumentDefinition:
                 f"Federal Program Identifier: {cfg['doc_id']}",
                 f"Issuing Agency: {cfg['agency']} | Catalog of Federal Domestic Assistance (CFDA) {cfg['cfda']}",
                 f"Announcement Title: {cfg['title']}",
-                f"This solicitation establishes a comprehensive federal funding mechanism to advance research, development, "
-                f"and demonstration of high-impact technologies aligned with national goals for energy resilience, scientific innovation, "
-                f"and critical infrastructure protection.",
-                f"Applicants must address key technical objectives including high-fidelity modeling, experimental hardware validation, "
-                f"rigorous cybersecurity protocols, and open scientific data dissemination.",
+                "This solicitation establishes a comprehensive federal funding mechanism to advance research, development, "
+                "and demonstration of high-impact technologies aligned with national goals for energy resilience, scientific innovation, "
+                "and critical infrastructure protection.",
+                "Applicants must address key technical objectives including high-fidelity modeling, experimental hardware validation, "
+                "rigorous cybersecurity protocols, and open scientific data dissemination.",
             ],
             bullet_points=[
                 f"CFDA Number: {cfg['cfda']} ({cfg['subtitle'].split('|')[0].strip()})",
-                f"Statutory Authority: Energy Policy Act of 2005 / National Science Foundation Act / Public Health Service Act",
+                "Statutory Authority: Energy Policy Act of 2005 / National Science Foundation Act / Public Health Service Act",
                 f"Applicable Standards: {cfg['standards']}",
             ],
             page_break_after=True,
@@ -468,7 +468,7 @@ def build_solicitation_from_item(cfg: dict) -> DocumentDefinition:
             level=1,
             paragraphs=[
                 f"{cfg['agency']} anticipates allocating an aggregate funding pool of approximately {cfg['pool']} across {cfg['awards']}.",
-                f"Individual project awards will be structured within defined statutory ceilings and floors.",
+                "Individual project awards will be structured within defined statutory ceilings and floors.",
             ],
             bullet_points=[
                 f"Anticipated Total Program Funding: {cfg['pool']}",
@@ -563,8 +563,8 @@ def build_solicitation_from_item(cfg: dict) -> DocumentDefinition:
                 level=2,
                 paragraphs=[
                     f"This section establishes administrative and technical requirements for Part {p_idx} of {cfg['doc_id']}.",
-                    f"Recipients must adhere to applicable regulatory frameworks: National Environmental Policy Act (NEPA), "
-                    f"Bayh-Dole Act for intellectual property rights, and federal export control regulations (EAR / ITAR).",
+                    "Recipients must adhere to applicable regulatory frameworks: National Environmental Policy Act (NEPA), "
+                    "Bayh-Dole Act for intellectual property rights, and federal export control regulations (EAR / ITAR).",
                     f"Applicable domain standards: {cfg['standards']}.",
                 ],
                 bullet_points=[
@@ -600,3 +600,9 @@ def build_diverse_solicitation_specs(count: int = 20) -> List[DocumentDefinition
     """Returns a list of diverse DocumentDefinition instances representing a realistic funding opportunity pipeline."""
     count = max(1, min(count, len(SOLICITATION_CATALOG)))
     return [build_solicitation_from_item(cfg) for cfg in SOLICITATION_CATALOG[:count]]
+
+
+def build_epa_resilience_spec() -> DocumentDefinition:
+    """Builds the canonical EPA Community Resilience sample NOFO specification."""
+    cfg = next(item for item in SOLICITATION_CATALOG if item["filename"] == "EPA_Resilience_2026_Sample.pdf")
+    return build_solicitation_from_item(cfg)

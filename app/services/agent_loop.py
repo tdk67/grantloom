@@ -79,7 +79,6 @@ class AgentRunResult:
     context_texts: list[str] = field(default_factory=list)
     events: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     timings: dict[str, Any] = field(default_factory=dict)
-    latency_profile: Optional[PipelineLatencyProfile] = None
 
 
 @dataclass
@@ -226,6 +225,7 @@ class WriterAgent:
         chunks: Sequence[DocumentChunk],
         tool_evidence: Sequence[str],
         issues: Sequence[str] = (),
+        draft: str = "",
     ) -> str:
         blocks = []
         for c in chunks:
@@ -241,7 +241,7 @@ class WriterAgent:
             )
         prompt += f"\n\nQuestion: {query}\n"
         if issues:
-            prompt += "\n" + render_template("prompts/writer_rewrite_feedback.txt", issues="\n".join(issues)) + "\n"
+            prompt += "\n" + render_template("prompts/writer_rewrite_feedback.txt", issues="\n".join(issues), draft=draft) + "\n"
         valid_ids = ", ".join(f"[{c.chunk_id}]" for c in chunks) if chunks else "none"
         return prompt + f"\nAnswer with explicit [chunk_id] citations (available IDs: {valid_ids}):"
 
@@ -394,7 +394,7 @@ class AgentLoopOrchestrator:
         draft = ""
         attempt = 0
         for attempt in range(1, max_drafts + 1):
-            prompt = self.writer.build_prompt(sanitized, outcome.chunks, outcome.tool_evidence, issues)
+            prompt = self.writer.build_prompt(sanitized, outcome.chunks, outcome.tool_evidence, issues, draft=draft)
             tokens: list[str] = []
             t_write_start = time.perf_counter()
             first_token_seen = False
@@ -408,7 +408,14 @@ class AgentLoopOrchestrator:
             profile.token_count += len(tokens)
             draft = "".join(tokens)
 
-            if ABSTENTION_MESSAGE.lower() in draft.lower() and "[" not in draft:
+            draft_lower = draft.lower()
+            is_abstention = (
+                ABSTENTION_MESSAGE.lower() in draft_lower
+                or "not found in the indexed documents" in draft_lower
+                or "not found in the provided context" in draft_lower
+                or "cannot find sufficient evidence" in draft_lower
+            )
+            if is_abstention:
                 profile.total_ms = (time.perf_counter() - t_pipeline_start) * 1000.0
                 if profile.generate_ms > 0 and profile.token_count > 0:
                     profile.tokens_per_second = profile.token_count / (profile.generate_ms / 1000.0)

@@ -15,7 +15,10 @@ from app.synthetic.fixtures import (
     build_past_proposal_spec,
     get_planted_facts,
 )
-from app.synthetic.solicitation_portfolio import build_diverse_solicitation_specs
+from app.synthetic.solicitation_portfolio import (
+    build_diverse_solicitation_specs,
+    build_epa_resilience_spec,
+)
 from app.synthetic.models import GroundTruthManifest
 from app.synthetic.pdf_builder import SyntheticPDFBuilder
 
@@ -50,6 +53,24 @@ class SyntheticDataGenerator:
             )
             if not quiet:
                 print(f"[SyntheticData] Generated {nofo_spec.filename}: {nofo_pages} pages ({nofo_path.stat().st_size:,} bytes)")
+
+        # Ensure canonical EPA Resilience sample is present for cross-solicitation benchmark comparison
+        if not any(f["filename"] == "EPA_Resilience_2026_Sample.pdf" for f in results["files"]):
+            epa_spec = build_epa_resilience_spec()
+            epa_path = self.output_dir / epa_spec.filename
+            self.pdf_builder.build_pdf(epa_spec, epa_path)
+            epa_pages = self._count_pdf_pages(epa_path)
+            results["files"].append(
+                {
+                    "filename": epa_spec.filename,
+                    "type": "solicitation_pdf",
+                    "path": str(epa_path),
+                    "pages": epa_pages,
+                    "size_bytes": epa_path.stat().st_size,
+                }
+            )
+            if not quiet:
+                print(f"[SyntheticData] Generated {epa_spec.filename}: {epa_pages} pages ({epa_path.stat().st_size:,} bytes)")
 
         # 2. Generate Past Proposal PDF (~15 pages)
         prop_spec = build_past_proposal_spec()

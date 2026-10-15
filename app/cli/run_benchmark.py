@@ -19,7 +19,6 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from app.core.config import get_settings
 from app.evaluation.harness import BenchmarkHarness, BenchmarkReport
 from app.evaluation.synthesizer import QuestionSynthesizer
 from app.evaluation.workspace import provision_eval_workspace
@@ -53,13 +52,15 @@ def print_report_summary(report: BenchmarkReport) -> None:
     rows = []
     for r in report.results:
         status = "[PASS]" if r.passed else "[FAIL]"
+        f_score = f"{r.triad.faithfulness:.2f}" if r.triad.faithfulness is not None else "N/A"
+        a_score = f"{r.triad.answer_relevance:.2f}" if r.triad.answer_relevance is not None else "N/A"
         rows.append([
             r.test_id[:16],
             r.question_type[:10],
             status,
             f"{r.triad.context_relevance:.2f}",
-            f"{r.triad.faithfulness:.2f}",
-            f"{r.triad.answer_relevance:.2f}",
+            f_score,
+            a_score,
             f"{r.triad.citation_resolvability:.2f}",
             f"{r.timings.get('total_ms', 0):.0f}",
         ])
@@ -104,7 +105,7 @@ async def run_single_benchmark(
         evaluator_model=evaluator_model,
     )
     try:
-        print(f"[2/3] Loading canonical benchmark test suite...", flush=True)
+        print("[2/3] Loading canonical benchmark test suite...", flush=True)
         synthesizer = QuestionSynthesizer()
         suite = synthesizer.get_canonical_suite()
 

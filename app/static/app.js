@@ -504,11 +504,13 @@ function appendBotMessageSkeleton(messageId) {
     <div class="message-body">Thinking...</div>
     <div class="message-warning hidden" role="alert"></div>`;
   // Insert directly below the newest user query at the top
-  const firstChild = elements.chatTranscript.firstChild;
-  if (firstChild && firstChild.nextSibling) {
-    elements.chatTranscript.insertBefore(msg, firstChild.nextSibling);
-  } else {
+  const latestUserMsg = elements.chatTranscript.querySelector(".message-user");
+  if (latestUserMsg && latestUserMsg.nextSibling) {
+    elements.chatTranscript.insertBefore(msg, latestUserMsg.nextSibling);
+  } else if (latestUserMsg) {
     elements.chatTranscript.appendChild(msg);
+  } else {
+    elements.chatTranscript.insertBefore(msg, elements.chatTranscript.firstChild);
   }
 }
 

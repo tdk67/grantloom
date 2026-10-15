@@ -44,7 +44,7 @@
   {
     "id": "ex_budget_vs_letter",
     "category": "Multi-Doc (Budget vs Partner)",
-    "question": "Verify whether the cost-share matching funds committed by the City of Chicago in their letter align with the non-federal share in our proposal records.",
+    "question": "Verify whether the cost-share matching funds committed by the Maryland Clean Energy Center in their letter align with the non-federal share in our proposal records.",
     "strategy_hint": "composite",
     "description": "Cross-verifies external partner commitment letters against internal budget spreadsheets."
   },

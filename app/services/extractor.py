@@ -469,7 +469,7 @@ class DocumentExtractor:
                             sheet_name="default",
                             row_start=first_row,
                             row_end=last_row,
-                            text=f"Sheet: default\n" + "\n".join(row_texts),
+                            text="Sheet: default\n" + "\n".join(row_texts),
                             metadata={"sheet": "default", "row_start": first_row, "row_end": last_row},
                         )
                     )

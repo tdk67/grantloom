@@ -19,10 +19,10 @@ logger = logging.getLogger("grantloom.services.retrieval")
 
 ABSTENTION_MESSAGE = "This information was not found in the indexed documents"
 
-NEAR_DUPLICATE_RE = re.compile(r"\d+|\s+")
+NEAR_DUPLICATE_RE = re.compile(r"\s+")
 
-DENSE_STRATEGIES = ("hybrid", "semantic", "structured", "graph")
-KEYWORD_STRATEGIES = ("hybrid", "keyword", "structured", "graph")
+DENSE_STRATEGIES = ("hybrid", "semantic", "structured", "graph", "composite")
+KEYWORD_STRATEGIES = ("hybrid", "keyword", "structured", "graph", "composite")
 
 
 @dataclass
@@ -113,11 +113,7 @@ class HybridRetrievalService:
 
         bm25_overlap_ratio = (best_overlap / len(query_tokens)) if query_tokens else 0.0
         dense_relevant = max_dense_score >= cfg.min_relevance_threshold
-        # Calibrated lexical relevance: matching at least min(2, len(query_tokens)) key terms
-        # in top BM25 results or meeting overlap ratio threshold confirms relevance without
-        # falsely aborting multi-clause or comparative queries.
-        min_overlap_required = min(2, len(query_tokens)) if query_tokens else 1
-        keyword_relevant = (bool(bm25_results) and best_overlap >= min_overlap_required) or (bm25_overlap_ratio >= cfg.min_bm25_overlap)
+        keyword_relevant = bm25_overlap_ratio >= cfg.min_bm25_overlap
         max_relevance_signal = max(max_dense_score, bm25_overlap_ratio)
 
         if not (dense_relevant or keyword_relevant):
@@ -135,13 +131,16 @@ class HybridRetrievalService:
             rrf_scores[res.chunk_id] = rrf_scores.get(res.chunk_id, 0.0) + 1.0 / (cfg.rrf_k + rank)
         ranked_ids = sorted(rrf_scores, key=lambda cid: rrf_scores[cid], reverse=True)
 
-        # 5. Keep chunks of active documents only (quarantined / deleting / failed docs never surface),
-        #    skipping near-duplicates (boilerplate repeated across pages with only numbers changed)
+        # 5. Keep chunks of active documents only, enforcing document diversification so a single
+        # document cannot starve secondary sources in multi-document / composite queries.
         retained: list[DocumentChunk] = []
         seen_texts: set[str] = set()
+        doc_counts: dict[str, int] = {}
+        max_per_doc = 4 if strategy in ("composite", "hybrid") else cfg.rerank_top_k
+        deferred: list[DocumentChunk] = []
+
+        # Pass 1: balanced retention respecting max_per_doc
         for cid in ranked_ids:
-            if len(retained) >= cfg.rerank_top_k:
-                break
             chunk = self.registry.get_chunk(cid)
             if chunk is None:
                 continue
@@ -151,6 +150,19 @@ class HybridRetrievalService:
             doc = self.registry.get_document(chunk.doc_id)
             if doc and doc.state == "active":
                 seen_texts.add(signature)
+                if doc_counts.get(chunk.doc_id, 0) < max_per_doc:
+                    doc_counts[chunk.doc_id] = doc_counts.get(chunk.doc_id, 0) + 1
+                    retained.append(chunk)
+                    if len(retained) >= cfg.rerank_top_k:
+                        break
+                else:
+                    deferred.append(chunk)
+
+        # Pass 2: fill remaining top_k slots if not exhausted
+        if len(retained) < cfg.rerank_top_k:
+            for chunk in deferred:
+                if len(retained) >= cfg.rerank_top_k:
+                    break
                 retained.append(chunk)
 
         if not retained:

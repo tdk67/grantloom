@@ -8,10 +8,10 @@ import shutil
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from app.adapters.chroma_adapter import ChromaVectorStoreAdapter
-from app.adapters.decision_backends import JevDecisionBackend, LLMJudgeDecisionBackend
+from app.adapters.decision_backends import LLMJudgeDecisionBackend
 from app.adapters.kuzu_adapter import KuzuGraphStoreAdapter
 from app.adapters.ollama_client import OllamaClientAdapter
 from app.adapters.openrouter_client import OpenRouterClientAdapter
@@ -25,10 +25,15 @@ from app.services.ask_service import AskService
 from app.services.chunker import DocumentChunker
 from app.services.extractor import DocumentExtractor
 from app.services.guardrails import IngestionScanner
-from app.services.inference import build_embedder, evaluator_independence_problems
+from app.services.inference import (
+    InferenceProfile,
+    build_decision_backend,
+    build_embedder,
+    evaluator_independence_problems,
+)
 from app.services.ingest_service import IngestionService
 from app.services.key_vault import EphemeralKeyVault
-from app.services.retrieval_service import HybridRetrievalService
+from app.services.retrieval_service import HybridRetrievalService, corpus_overlap
 from app.synthetic.generator import SyntheticDataGenerator
 from app.verification.sql_guard import SqlGuard
 from app.workers.ingest_worker import IngestWorker
@@ -60,6 +65,8 @@ class EvalWorkspace:
     evaluator: Optional[DecisionBackendPort]
     evaluator_label: str
     writer_label: str
+    eval_client: Optional[LLMClientPort] = None
+    eval_model: Optional[str] = None
     generated_files: list[dict[str, Any]] = field(default_factory=list)
     solicitation_count: int = 10
     api_key: Optional[str] = None
@@ -137,6 +144,7 @@ async def provision_eval_workspace(
             base_url=settings.llm.openrouter_base_url,
             timeout_seconds=settings.timeouts.openrouter_seconds,
             log_full_prompts=settings.logging.log_full_prompts,
+            default_max_tokens=settings.models.max_tokens,
         )
         await client.validate_api_key(api_key)
         resolved_writer_model = writer_model or settings.models.writer_model
@@ -164,21 +172,23 @@ async def provision_eval_workspace(
         logger.warning("Evaluator independence warning: %s", independence_issues[0])
 
     llm: LLMClientPort = custom_llm_client or client
-    base_judge = LLMJudgeDecisionBackend(client, resolved_judge_model, settings.decision)
+    profile = InferenceProfile(
+        mode="eval",
+        client=client,
+        writer_model=resolved_writer_model,
+        judge_model=resolved_judge_model,
+        embedding_description=f"eval:{settings.models.embedding_backend}",
+    )
     if custom_decision_backend:
         decision_backend = custom_decision_backend
-    elif settings.decision.backend == "jev":
-        decision_backend = JevDecisionBackend(
-            api_key=api_key or "",
-            model=settings.decision.jev_model,
-            base_url=settings.decision.jev_base_url,
-            timeout_seconds=settings.timeouts.openrouter_seconds,
-            config=settings.decision,
-            judge_delegate=base_judge,
-        )
     else:
-        decision_backend = base_judge
-    evaluator = LLMJudgeDecisionBackend(client, resolved_eval_model, settings.decision)
+        decision_backend = build_decision_backend(
+            settings=settings,
+            profile=profile,
+            corpus_overlap=lambda q: corpus_overlap(registry, q),
+            api_key=api_key,
+        )
+    evaluator = decision_backend if settings.decision.backend == "jev" else LLMJudgeDecisionBackend(client, resolved_eval_model, settings.decision)
 
     key_vault = EphemeralKeyVault()
     embedder = build_embedder(settings)
@@ -239,8 +249,10 @@ async def provision_eval_workspace(
         graph_store=graph_store,
         ask_service=ask_service,
         evaluator=evaluator,
-        evaluator_label=f"{writer_provider}:{resolved_eval_model}",
+        evaluator_label=f"jev:{settings.decision.jev_model}" if settings.decision.backend == "jev" else f"{writer_provider}:{resolved_eval_model}",
         writer_label=f"{writer_provider}:{resolved_writer_model}",
+        eval_client=client,
+        eval_model=resolved_eval_model,
         generated_files=generated["files"],
         solicitation_count=solicitation_count,
         api_key=api_key,

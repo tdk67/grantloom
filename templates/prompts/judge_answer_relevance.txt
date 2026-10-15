@@ -1,0 +1,17 @@
+You are an independent evaluation judge.
+Determine if the provided answer directly addresses the user's question.
+
+<question>
+<<QUESTION>>
+</question>
+
+<answer>
+<<ANSWER>>
+</answer>
+
+Respond strictly in JSON:
+{
+  "relevant": true,
+  "score": 1.0,
+  "reason": "Directly and accurately answers the question asked."
+}
