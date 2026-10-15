@@ -243,6 +243,7 @@ async def build_eval_run(
             base_url=settings.decision.jev_base_url,
             timeout_seconds=settings.timeouts.openrouter_seconds,
             config=settings.decision,
+            judge_delegate=base_judge,
         )
         decision_label = f"jev {provider}:{jev}"
     else:

@@ -498,9 +498,9 @@ class JevDecisionBackend(DecisionBackendPort):
                 f"Jev Decisions returned strategy '{choice}' not in available strategies: {list(available_strategies)}"
             )
         try:
-            conf = float(strat_info.get("confidence", 0.95))
-        except (ValueError, TypeError):
-            conf = 0.95
+            conf = float(strat_info["confidence"])
+        except (KeyError, ValueError, TypeError) as exc:
+            raise DecisionBackendError(f"Jev Decisions returned no numeric confidence: {strat_info!r}") from exc
         return GateVerdict(
             gate_id="G2",
             passed=True,

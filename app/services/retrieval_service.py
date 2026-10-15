@@ -136,7 +136,7 @@ class HybridRetrievalService:
         retained: list[DocumentChunk] = []
         seen_texts: set[str] = set()
         doc_counts: dict[str, int] = {}
-        max_per_doc = 4 if strategy in ("composite", "hybrid") else cfg.rerank_top_k
+        max_per_doc = cfg.max_chunks_per_doc if strategy in ("composite", "hybrid") else cfg.rerank_top_k
         deferred: list[DocumentChunk] = []
 
         # Pass 1: balanced retention respecting max_per_doc

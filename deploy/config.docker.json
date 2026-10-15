@@ -37,6 +37,7 @@
     "min_relevance_threshold": 0.35,
     "min_bm25_overlap": 0.35,
     "rerank_top_k": 10,
+    "max_chunks_per_doc": 4,
     "top_k_after_filter": 10,
     "max_structured_tables": 6,
     "max_tool_evidence_chunks": 6

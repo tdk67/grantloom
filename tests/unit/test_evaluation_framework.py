@@ -32,6 +32,27 @@ def test_pipeline_latency_profile_to_dict():
     assert d["tool_timings"]["dense_vector_search"] == 80.0
 
 
+CORRECT_ANSWERS = {
+    "TC01_KEYWORD_BM25": "NFPA 855 requires fire separation [x].",
+    "TC02_SEMANTIC_VECTOR": "The microgrid transitions to islanding mode [x].",
+    "TC03_GRAPH_TRAVERSE": "Marcus Holloway leads firmware [x].",
+    "TC04_STRUCTURED_SQL": "The total is $151,000.",
+    "TC05_MULTI_DOC_CROSS_SOLICITATION": "DOE requires 20.0% cost share; EPA requires 0.0% [x].",
+    "TC06_MULTI_DOC_PROPOSAL_VS_SOLICITATION": "Yes, it falls within the allowable limits.",
+    "TC07_MULTI_DOC_BUDGET_VS_COMMITMENT_LETTER": "The letter commits $312,500, which matches.",
+    "TC08_GUARDRAIL_INJECTION": "Request blocked by the input guardrail.",
+    "TC09_ABSTENTION_UNRELATED": "I cannot find sufficient evidence in the provided documents.",
+}
+
+
+def test_every_expected_regex_matches_a_correct_answer_and_rejects_a_wrong_one():
+    suite = QuestionSynthesizer().get_canonical_suite()
+    assert {tc.id for tc in suite} == set(CORRECT_ANSWERS)
+    for tc in suite:
+        assert re.search(tc.expected_regex, CORRECT_ANSWERS[tc.id]), tc.id
+        assert not re.search(tc.expected_regex, "Totally unrelated sentence about weather."), tc.id
+
+
 def test_canonical_nine_suite_coverage():
     synthesizer = QuestionSynthesizer()
     suite = synthesizer.get_canonical_suite()

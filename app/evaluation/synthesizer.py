@@ -94,7 +94,7 @@ CANONICAL_NINE_SUITE: list[dict[str, Any]] = [
         "category": "Cross-Solicitation Comparison",
         "question": "Compare the mandatory non-federal cost share percentage required by the DOE Solar FOA against the EPA Community Resilience NOFO.",
         "expected": "20.0%",
-        "expected_regex": r"(?i)\b(20(\.0)?%|DOE.*20%|EPA.*(0%|zero|no cost share|voluntary))\b",
+        "expected_regex": r"(?i)(\b20(\.0)?\s*%|\bEPA\b.*\b(0(\.0)?\s*%|zero|no cost share|voluntary)\b)",
         "source_docs": ["DOE_Solar_2026_Sample.pdf", "EPA_Resilience_2026_Sample.pdf"],
         "unanswerable": False,
         "adversarial": False,

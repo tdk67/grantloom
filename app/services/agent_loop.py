@@ -409,12 +409,9 @@ class AgentLoopOrchestrator:
             draft = "".join(tokens)
 
             draft_lower = draft.lower()
-            is_abstention = (
-                ABSTENTION_MESSAGE.lower() in draft_lower
-                or "not found in the indexed documents" in draft_lower
-                or "not found in the provided context" in draft_lower
-                or "cannot find sufficient evidence" in draft_lower
-            )
+            # Structural: the exact abstention sentence AND no [chunk_id] citation marker. A cited
+            # answer that merely quotes the phrase goes through validation instead.
+            is_abstention = ABSTENTION_MESSAGE.lower() in draft_lower and "[" not in draft
             if is_abstention:
                 profile.total_ms = (time.perf_counter() - t_pipeline_start) * 1000.0
                 if profile.generate_ms > 0 and profile.token_count > 0:

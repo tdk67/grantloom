@@ -108,30 +108,24 @@ Browser SPA (vanilla JS)  ──HTTP/SSE──▶  FastAPI  (X-API-Key, rate lim
 
 ### Guardrail gates and the decision backend
 
-| Gate | What runs | Latency (Native Jev) |
-|---|---|---|
-| **G1 input** | Regex prefilter (non-English scripts, canonical injection phrases), followed by native TypeSafe Jev decisions (`noul` questions for prompt injection and domain relevance). | **~600–800 ms** |
-| **G2 router** | Native TypeSafe Jev decisions (`choice` across `hybrid`, `keyword`, `structured`, `graph`, `composite`, `semantic`). | **~750–850 ms** |
-| **G3 context** | Drops chunks tainted at ingestion, injection-like chunks and irrelevant chunks; reranks by verdict. | **~800 ms** |
-| **G4 output** | Citation coordinate resolver (physical file, page, sheet, row) + per-claim verification via native Jev decisions (`choice` for `grounded`, `contradicted`, `unsupported`). | **~725–850 ms** |
-| **Ingestion** | Tier 1 regex on every chunk; Tier 2 semantic check on flagged chunks plus a random sample; quarantine when tainted *chunks* exceed `guardrails.taint_threshold_chunks`. Graph extraction indexes entities into KùzuDB with full error diagnostics. | Batch |
+| Gate | What runs |
+|---|---|
+| **G1 input** | Regex prefilter (non-English scripts, canonical injection phrases), followed by native TypeSafe Jev decisions (`noul` questions for prompt injection and domain relevance). |
+| **G2 router** | Native TypeSafe Jev decisions (`choice` across `hybrid`, `keyword`, `structured`, `graph`, `composite`, `semantic`). |
+| **G3 context** | Drops chunks tainted at ingestion, injection-like chunks and irrelevant chunks; reranks by verdict. |
+| **G4 output** | Citation coordinate resolver (physical file, page, sheet, row) + per-claim verification by the judge delegate (`llm_judge`; `grounded` / `contradicted` / `unsupported`). |
+| **Ingestion** | Tier 1 regex on every chunk; Tier 2 semantic check on flagged chunks plus a random sample; quarantine when tainted *chunks* exceed `guardrails.taint_threshold_chunks`. Graph extraction indexes entities into KùzuDB with full error diagnostics. |
 
 The **decision backend** (`decision.backend`) supports:
-* `jev` (**default & production**): Direct integration with the OpenRouter Decisions API (`https://openrouter.ai/api/alpha/decisions` via `typesafe/jev-1.13`). Uses typed non-autoregressive decision primitives (`choice`, `noul`, `score`) achieving sub-second gate latencies (~600–850ms) across G1, G2, G4, and independent evaluation verification.
+* `jev` (**default & production**): Direct integration with the OpenRouter Decisions API (`https://openrouter.ai/api/alpha/decisions` via `typesafe/jev-1.13`). Uses typed non-autoregressive decision primitives (`choice`, `noul`, `score`) achieving low-latency gate decisions across G1, G2, G4, and independent evaluation verification.
 * `llm_judge`: Prompt-based judge running on a conversational LLM (e.g. `openai/gpt-4o-mini`).
-
-#### Evaluation of Alternative Guardrail Libraries (Meta Prompt-Guard vs. Native Jev)
-To evaluate industry-standard non-LLM guardrail frameworks for G1, Meta's `Prompt-Guard-86M_onnx` was benchmarked directly outside the pipeline using ONNX Runtime on CPU against canonical grant and adversarial queries:
-* **Latency:** Prompt-Guard ONNX averaged **1,458 ms – 2,142 ms** per query on CPU—measurably *slower* than native Jev cloud decisions (~600–800 ms).
-* **Accuracy & False Positives:** Prompt-Guard exhibited a **100% false positive rate** on legitimate technical grant queries, classifying domain terms like *"standard NFPA 855 and IEEE 1547"*, *"high-temperature limits for lithium iron phosphate cells"*, and *"total requested budget across all equipment line items"* as malicious `INJECTION` with 1.00 probability.
-* **Conclusion:** Native Jev via `/api/alpha/decisions` correctly passed 100% of benign technical queries while accurately flagging adversarial prompt injections in 607 ms and out-of-domain queries in 534 ms. Native Jev was selected as the primary G1/G2/G4 decision engine.
 
 ### Retriever tools & Multi-Document Agentic RAG
 
 GrantLoom fuses semantic vector search and lexical search with tool-assisted structured tabular querying:
 * **Dense Semantic Vector Search:** Embedded with `openai/text-embedding-3-small` (1536 dimensions) via OpenRouter into ChromaDB, replacing deterministic non-semantic hashes.
 * **Lexical BM25 Search:** SQLite FTS5 bigram index with query sanitization.
-* **Multi-Document Chunk Diversification:** When cross-document queries are routed to `composite` or `hybrid` (e.g., comparing cost-share requirements across solicitations or matching proposals to FOAs), a two-pass retention filter caps chunks from any single document to `max_per_doc = 4`. This prevents a single 10-page document from monopolizing all top-10 slots and guarantees evidence from secondary documents (proposals, commitment letters) is retained.
+* **Multi-Document Chunk Diversification:** When cross-document queries are routed to `composite` or `hybrid` (e.g., comparing cost-share requirements across solicitations or matching proposals to FOAs), a two-pass retention filter caps chunks from any single document at `retrieval.max_chunks_per_doc`. This prevents a single 10-page document from monopolizing all top-10 slots and guarantees evidence from secondary documents (proposals, commitment letters) is retained.
 * **Structured AST SQL Guard:** `sql_tabular_query` translates questions over spreadsheet cell ranges into safe, read-only SQLite SQL queries, returning exact arithmetic sums and averages.
 * **Knowledge Graph Traversal:** `graph_traverse_query` traverses institutional relationships (personnel, facilities, past awards) in embedded KùzuDB.
 
@@ -139,7 +133,7 @@ GrantLoom fuses semantic vector search and lexical search with tool-assisted str
 
 * **Concise Token Budgeting:** The Writer is capped at `models.max_tokens: 350` and guided by system prompts to emit concise, 1–3 sentence grounded answers. This prevents verbose draft generation delays (reducing generation time from 30–50s down to 3–6s).
 * **Targeted Rewrite Feedback:** When G4 verification detects an ungrounded claim or unresolvable citation, the writer prompt receives both the **previous draft** and specific issue reasons (`UNSUPPORTED`, `CONTRADICTED`, `UNRESOLVED`). The writer is explicitly instructed to drop unsupported claims or cleanly abstain if evidence is absent, preventing repetitive 3-turn rewrite loops.
-* **Jev-Powered Verifier:** Both the pipeline G4 output guard and the benchmark evaluation harness use native Jev (`typesafe/jev-1.13`) rather than slow LLM judge calls, guaranteeing sub-second verification and model family independence (NFR-6).
+* **Jev-Powered Verifier:** Both the pipeline G4 output guard and the benchmark evaluation harness use the configured decision backend; the judge model must differ in family from the writer (NFR-6).
 
 ## Quickstart
 
@@ -220,7 +214,7 @@ python -m app.cli.run_eval --decision jev                    # Full 50-item gold
 
 * **Answer accuracy / recall@k** use whole-value matching (normalized numbers, word boundaries, or an
   explicit `expected_regex`); recall is measured on the chunks actually given to the writer.
-* **Faithfulness & Evaluator** is judged by native TypeSafe Jev (`typesafe/jev-1.13`), enforcing strict model independence from the writer (NFR-6) with sub-second decision latency (~725 ms).
+* **Faithfulness & Evaluator** is judged by native TypeSafe Jev (`typesafe/jev-1.13`), enforcing strict model independence from the writer (NFR-6).
 * **RAG Triad Metrics:** The benchmark harness measures:
   1. **Context Relevance:** Share of retrieved chunks relevant to the ground truth target.
   2. **Groundedness / Faithfulness:** Percentage of answer claims directly supported by cited evidence coordinates.

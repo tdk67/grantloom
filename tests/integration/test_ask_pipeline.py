@@ -95,6 +95,30 @@ async def test_successful_query_with_resolved_citations(stack, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_cited_answer_quoting_abstention_phrase_is_kept(stack, tmp_path):
+    """The abstention shortcut is structural (phrase AND no citation); a cited answer is validated."""
+    doc_id = await _ingest_solicitation(stack, tmp_path)
+    page1 = next(c for c in stack.registry.get_chunks_for_document(doc_id) if c.page_number == 1)
+    llm = ScriptedLLM(drafts=[
+        f"The equipment threshold is $50,000 [{page1.chunk_id}]. Travel limits: {ABSTENTION_MESSAGE}.",
+    ])
+    _, events = await _ask(stack.app(llm), "What is the equipment threshold?")
+    done = dict(events)["done"]
+    assert done["abstention"] is False
+    assert "50,000" in done["answer"] and done["citations"]
+
+
+@pytest.mark.asyncio
+async def test_uncited_abstention_draft_is_accepted_without_rewrites(stack, tmp_path):
+    await _ingest_solicitation(stack, tmp_path)
+    llm = ScriptedLLM(drafts=[ABSTENTION_MESSAGE])
+    _, events = await _ask(stack.app(llm), "What is the equipment threshold?")
+    done = dict(events)["done"]
+    assert done["abstention"] is True and done["answer"] == ABSTENTION_MESSAGE
+    assert done["attempts"] == 1 and llm.draft_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_citation_outside_context_is_stripped(stack, tmp_path):
     """A real chunk id that was not in the writer's context is not a valid citation, and a final
     draft left with zero resolvable citations is discarded — an uncited answer is not accepted

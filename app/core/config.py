@@ -78,6 +78,7 @@ class RetrievalConfig(_Strict):
     min_bm25_overlap: float  # lexical-overlap floor for the abstention check; calibrated separately
     # from the dense cosine score because the two signals live on different scales (review-04 C2)
     rerank_top_k: int
+    max_chunks_per_doc: int  # diversification cap for composite/hybrid retrieval
     top_k_after_filter: int
     max_structured_tables: int
     max_tool_evidence_chunks: int
